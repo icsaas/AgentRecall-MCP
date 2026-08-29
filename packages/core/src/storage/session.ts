@@ -31,15 +31,48 @@ import { sanitizeName } from "./sanitize.js";
 import { getRoot } from "../types.js";
 import type { SignificanceTag, ThemeTag } from "../helpers/journal-sig-theme.js";
 
-/** 6-char hex ID, unique per process. Generated once on import. */
-const SESSION_ID = crypto.randomBytes(3).toString("hex");
+/**
+ * 6-char hex fallback ID for hosts with no real session identity available.
+ * Generated once on import (module-load time), so it is stable for the life
+ * of THIS process — but a fresh random id every time, which is exactly the
+ * bug this module's session-id pairing fix (below) exists to route around.
+ */
+const FALLBACK_SESSION_ID = crypto.randomBytes(3).toString("hex");
 
 /** Track which files this session has claimed (owns). */
 const ownedFiles = new Set<string>();
 
-/** Get the current process session ID. */
+/**
+ * Get the current session's identity.
+ *
+ * Wave 0 measurement fix (2026-08-29): Claude Code's SessionStart and Stop
+ * hooks each fire `ar hook-start` / `ar hook-end` as a SEPARATE CLI
+ * subprocess. The old implementation returned a per-process random id
+ * (`crypto.randomBytes` evaluated once at module-import time) — since each
+ * hook invocation is a fresh Node process, session_start and session_end
+ * telemetry/outcome events for the SAME real user session were stamped with
+ * two DIFFERENT random ids and could never be paired.
+ *
+ * Fix: prefer `process.env["CLAUDE_CODE_SESSION_ID"]` — the REAL session id
+ * Claude Code sets in every subprocess it spawns (verified live on this
+ * machine, see reports/2026-08-12-trainc-fix-report.md's env probe; also the
+ * id `host-profile.ts`'s doc comments already call "the REAL
+ * `CLAUDE_CODE_SESSION_ID`", and the SAME env var `isHookOwnedHost()`'s
+ * CLAUDE_CODE_* signal detection already keys off). This id is STABLE across
+ * every subprocess Claude Code spawns for one real session, so hook-start and
+ * hook-end now stamp the SAME id. Read fresh on every call (not cached at
+ * module-load time) so a test that sets/clears the env var mid-process sees
+ * the change immediately — required for the "two calls, same env, same
+ * process" pairing proof, and harmless in production since a real process's
+ * env is constant for its whole lifetime anyway.
+ *
+ * Falls back to the per-process random id when the env var is absent (non-
+ * hook hosts, e.g. Codex/raw MCP/SDK/CLI) — unchanged behavior for those
+ * hosts: still unique per process, exactly as before this fix.
+ */
 export function getSessionId(): string {
-  return SESSION_ID;
+  const real = process.env["CLAUDE_CODE_SESSION_ID"];
+  return real && real.trim() ? real.trim() : FALLBACK_SESSION_ID;
 }
 
 /** Save type for intelligent naming. */
@@ -156,14 +189,14 @@ export function journalFileName(date: string, baseExists: boolean, opts?: SmartN
   const baseKey = `journal:${date}`;
 
   if (ownedFiles.has(`${baseKey}:base`)) return `${date}.md`;
-  if (ownedFiles.has(`${baseKey}:session`)) return `${date}-${SESSION_ID}.md`;
+  if (ownedFiles.has(`${baseKey}:session`)) return `${date}-${FALLBACK_SESSION_ID}.md`;
 
   if (!baseExists) {
     ownedFiles.add(`${baseKey}:base`);
     return `${date}.md`;
   }
   ownedFiles.add(`${baseKey}:session`);
-  return `${date}-${SESSION_ID}.md`;
+  return `${date}-${FALLBACK_SESSION_ID}.md`;
 }
 
 /**
@@ -194,14 +227,14 @@ export function captureLogFileName(date: string, baseExists: boolean, opts?: Sma
   const baseKey = `capture:${date}`;
 
   if (ownedFiles.has(`${baseKey}:base`)) return `${date}-log.md`;
-  if (ownedFiles.has(`${baseKey}:session`)) return `${date}-${SESSION_ID}-log.md`;
+  if (ownedFiles.has(`${baseKey}:session`)) return `${date}-${FALLBACK_SESSION_ID}-log.md`;
 
   if (!baseExists) {
     ownedFiles.add(`${baseKey}:base`);
     return `${date}-log.md`;
   }
   ownedFiles.add(`${baseKey}:session`);
-  return `${date}-${SESSION_ID}-log.md`;
+  return `${date}-${FALLBACK_SESSION_ID}-log.md`;
 }
 
 /** Reset owned files tracking (call at session boundaries). */

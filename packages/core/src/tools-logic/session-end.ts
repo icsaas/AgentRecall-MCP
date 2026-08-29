@@ -420,21 +420,36 @@ export async function sessionEnd(input: SessionEndInput): Promise<SessionEndResu
               evidence: "correction consulted via check-action this session; no recurrence markers in summary",
               session_id: sessionId,
             });
+          } else if (hasTopicalOverlap && !hasRecurrenceMarker) {
+            // Heed-rate credit model Option A (2026-08-29 design decision, see
+            // reports/2026-08-29-heed-design.md): the correction's topic came
+            // up this session (weak topical-overlap evidence) and no
+            // recurrence marker fired, but there was no authoritative
+            // check/check-action trigger evidence — NOT strong enough for
+            // "heeded", but no longer default-bucketed into "unknown" either.
+            // A SEPARATE, weaker signal (own counter `not_violated_count`),
+            // deliberately excluded from heed_rate/precision/proof_confidence.
+            recordOutcome({
+              correction_id: c.id,
+              project: slug,
+              kind: "not_violated",
+              at: nowISO,
+              evidence: `topical overlap (${matchCount} content words matched); no recurrence marker in summary`,
+              session_id: sessionId,
+            });
           } else {
-            // No positive trigger or recurrence evidence → unknown.
+            // No positive trigger, recurrence, or topical evidence → unknown.
             // Pre-C3: this path was "heeded" (default-heeded bias).
             // Post-C3: this is "unknown" — absence of evidence ≠ heeded.
-            // Includes: topical overlap alone (cannot distinguish heeded vs recurred),
-            // and no overlap at all (retrieved but irrelevant to this session's work).
-            const evidenceNote = hasTopicalOverlap
-              ? `topical overlap detected (${matchCount} content words matched) but no trigger evidence — cannot determine heeded/recurred`
-              : "no trigger or topical evidence; correction was retrieved but not consulted via check-action";
+            // (A recurrence marker present but with neither trigger nor topical
+            // evidence to attribute it to THIS correction also lands here —
+            // unchanged from before this Option A split.)
             recordOutcome({
               correction_id: c.id,
               project: slug,
               kind: "unknown",
               at: nowISO,
-              evidence: evidenceNote,
+              evidence: "no trigger or topical evidence; correction was retrieved but not consulted via check-action",
               session_id: sessionId,
             });
           }

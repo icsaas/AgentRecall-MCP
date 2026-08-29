@@ -236,7 +236,7 @@ describe("C3 recurrence detection: topical overlap + marker", () => {
     assert.ok(!myKinds?.has("recurred"), "recurred should NOT fire without topical overlap");
   });
 
-  it("topical overlap alone (no recurrence marker) → unknown", async () => {
+  it("topical overlap alone (no recurrence marker) → not_violated (heed-design Option A, 2026-08-29)", async () => {
     const correction = makeTestCorrection({
       rule: "Always validate input before processing database queries",
       context: "Input validation prevents injection attacks.",
@@ -254,8 +254,12 @@ describe("C3 recurrence detection: topical overlap + marker", () => {
 
     const kinds = readAllOutcomeKinds(PROJECT);
     const myKinds = kinds.get(id);
-    // Topical overlap alone → unknown (cannot distinguish heeded from non-heeded)
-    assert.ok(myKinds?.has("unknown"), "topical overlap alone should yield unknown, not heeded");
+    // Heed-design Option A (reports/2026-08-29-heed-design.md): topical overlap
+    // alone (no recurrence marker, no authoritative trigger) now yields
+    // "not_violated" — a SEPARATE, weaker signal than heeded, no longer
+    // default-bucketed into "unknown".
+    assert.ok(myKinds?.has("not_violated"), "topical overlap alone should yield not_violated");
+    assert.ok(!myKinds?.has("unknown"), "unknown should NOT fire when topical overlap exists (that's now not_violated's job)");
     assert.ok(!myKinds?.has("heeded"), "heeded should NOT fire on topical overlap alone (no trigger)");
     assert.ok(!myKinds?.has("recurred"), "recurred should NOT fire without recurrence marker");
   });
@@ -618,7 +622,10 @@ describe("C3 meta-content guard: eval prose must not fire recurrence", () => {
     const myKinds = kinds.get(id);
     assert.ok(myKinds, "outcome events should exist");
     assert.ok(!myKinds.has("recurred"), "recurred must NOT fire on eval-meta prose");
-    assert.ok(myKinds.has("unknown"), "topical overlap without genuine marker → unknown");
+    // Heed-design Option A (reports/2026-08-29-heed-design.md): topical overlap
+    // without a genuine recurrence marker now yields "not_violated", not "unknown".
+    assert.ok(myKinds.has("not_violated"), "topical overlap without genuine marker → not_violated");
+    assert.ok(!myKinds.has("unknown"), "unknown should NOT fire when topical overlap exists");
   });
 
   it("(b) genuine first-person violation → recurred fires", async () => {

@@ -318,4 +318,62 @@ describe("C2 lifecycle idempotency + telemetry", () => {
     delete process.env.AGENT_RECALL_ROOT;
     fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   });
+
+  // ── Test 8 (Wave 0 measurement fix): host_tier wiring ───────────────────────
+  // lifecycle-telemetry.ts used to write the raw AR_HOST env value, defaulting
+  // to the literal string "unknown" whenever AR_HOST was unset (effectively
+  // always, on a real host) — a 100%-blind field. It must now record the REAL
+  // resolved tier from resolveHostProfile(), for both an explicit AR_HOST and
+  // the no-signal conservative default, and must never write "unknown".
+
+  it("lifecycle telemetry: host_tier records the resolved tier for a known AR_HOST, not \"unknown\"", () => {
+    const TEST_ROOT = path.join(os.tmpdir(), "ar-c2-host-tier-" + Date.now() + "-" + Math.random().toString(16).slice(2));
+    process.env.AGENT_RECALL_ROOT = TEST_ROOT;
+
+    // Snapshot + clear ambient Claude Code signals so this test is hermetic
+    // regardless of what environment `npm test` itself runs under (mirrors
+    // host-profile.test.mjs's own isolation pattern).
+    const touchedKeys = ["AR_HOST", "CLAUDECODE"];
+    const snapshot = {};
+    for (const key of touchedKeys) snapshot[key] = process.env[key];
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("CLAUDE_CODE_")) snapshot[key] = process.env[key];
+    }
+    for (const key of Object.keys(snapshot)) delete process.env[key];
+
+    try {
+      process.env.AR_HOST = "claude-code";
+      core.recordLifecycleEvent("check", "host-tier-session-a", "host-tier-proj", false);
+      const rowsA = readTelemetryLines(TEST_ROOT);
+      assert.equal(rowsA.length, 1);
+      assert.equal(rowsA[0].host_tier, "A", "AR_HOST=claude-code must resolve to tier A, not the raw string or \"unknown\"");
+      assert.notEqual(rowsA[0].host_tier, "unknown");
+
+      // Wipe telemetry between sub-cases so each assertion reads only its own row.
+      fs.rmSync(path.join(TEST_ROOT, "telemetry", "lifecycle.jsonl"), { force: true });
+
+      delete process.env.AR_HOST;
+      process.env.AR_HOST = "codex";
+      core.recordLifecycleEvent("check", "host-tier-session-b", "host-tier-proj", false);
+      const rowsB = readTelemetryLines(TEST_ROOT);
+      assert.equal(rowsB[0].host_tier, "B", "AR_HOST=codex must resolve to tier B");
+
+      fs.rmSync(path.join(TEST_ROOT, "telemetry", "lifecycle.jsonl"), { force: true });
+
+      // No AR_HOST, no Claude Code signal at all — the conservative MCP
+      // default (tier B) must still be a REAL tier, never "unknown".
+      delete process.env.AR_HOST;
+      core.recordLifecycleEvent("check", "host-tier-session-c", "host-tier-proj", false);
+      const rowsC = readTelemetryLines(TEST_ROOT);
+      assert.equal(rowsC[0].host_tier, "B", "no-signal default must resolve to tier B, not \"unknown\"");
+      assert.notEqual(rowsC[0].host_tier, "unknown");
+    } finally {
+      for (const [key, value] of Object.entries(snapshot)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      delete process.env.AGENT_RECALL_ROOT;
+      fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+    }
+  });
 });

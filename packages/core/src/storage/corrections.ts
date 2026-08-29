@@ -64,6 +64,17 @@ export interface CorrectionRecord {
   retrieved_count?: number;   // How many times this was surfaced via check/recall
   heeded_count?: number;      // How many times the agent's next action honored it
   recurrence_count?: number;  // How many times the same bug recurred AFTER retrieval
+  /**
+   * Heed-rate credit model, Option A (2026-08-29 design decision, see
+   * reports/2026-08-29-heed-design.md). A SEPARATE, weaker-evidence counter —
+   * fires at session-end when the correction's topic demonstrably came up in
+   * the session (topical overlap) AND no recurrence marker fired, but there
+   * was no authoritative check/check-action trigger evidence either. Kept
+   * STRICTLY SEPARATE from `heeded_count`/`recurrence_count`: the north-star
+   * `heed_rate = heeded/(heeded+recurred)` formula must never read this
+   * field. Never blended into `precision` or `proof_confidence`.
+   */
+  not_violated_count?: number;
   precision?: number;         // heeded / retrieved (cached, recomputed on outcome)
   last_retrieved?: string;    // ISO timestamp
   last_outcome?: string;      // ISO timestamp of most recent heeded/recurrence event
@@ -141,11 +152,21 @@ export interface CorrectionOutcome {
    * "unknown"       = no positive evidence for any verdict (NEW DEFAULT — replaces
    *                   the pre-C3 default-heeded bias; see docs/proposals/c3-heed-instrumentation-design.md)
    *
+   * Heed-rate credit model Option A (2026-08-29, see reports/2026-08-29-heed-design.md):
+   * "not_violated"  = the correction's topic demonstrably came up this session
+   *                   (topical overlap — the SAME `hasTopicalOverlap` check
+   *                   already computed for the heeded/recurred/unknown split)
+   *                   AND no recurrence marker fired, but there was no
+   *                   authoritative trigger evidence either. A SEPARATE, weaker
+   *                   signal than "heeded" — increments its OWN counter
+   *                   (`not_violated_count`) and must NEVER be read by the
+   *                   north-star `heed_rate = heeded/(heeded+recurred)` formula.
+   *
    * Backward-compatibility: old readers that filter on the pre-C3 kind set skip
    * these new kinds without error (confirmed: rmr-report.mjs, activity-feed.ts).
    */
   kind: "retrieved" | "heeded" | "recurred" | "predicted" | "predict_hit"
-      | "triggered" | "not_triggered" | "unknown";
+      | "triggered" | "not_triggered" | "unknown" | "not_violated";
   /**
    * SEMANTIC timestamp (ISO) — the day the outcome belongs to. The dream-audit
    * path (C3b) deliberately backdates this to the audited day so day-bucketed
@@ -201,6 +222,13 @@ export interface CorrectionKPI {
   triggered_count: number;
   unknown_count: number;
   not_triggered_count: number;
+  /**
+   * Heed-rate credit model Option A (2026-08-29) — sum of `not_violated_count`
+   * across all corrections. Reported for VISIBILITY only; deliberately NOT
+   * blended into `heed_rate`/`precision`/`verdict_coverage`. A human/report
+   * script decides how to combine it later (see heed-design.md).
+   */
+  not_violated_count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1176,14 @@ export function recordOutcome(outcome: CorrectionOutcome): void {
       updated.last_predicted = outcome.at;
     } else if (outcome.kind === "predict_hit") {
       updated.predict_hits = (updated.predict_hits ?? 0) + 1;
+    } else if (outcome.kind === "not_violated") {
+      // Heed-rate credit model Option A (2026-08-29): its OWN counter, seeded
+      // only on its own first event (mirrors predicted_count/predict_hits'
+      // pattern, NOT the unconditional retrieved/heeded/recurrence baseline
+      // seed above) — deliberately kept out of precision/proof_confidence
+      // below, which read ONLY heeded_count/recurrence_count.
+      updated.not_violated_count = (updated.not_violated_count ?? 0) + 1;
+      updated.last_outcome = outcome.at;
     }
     const r = updated.retrieved_count ?? 0;
     // Clamp to [0,1]: `retrieved` is guarded 1/day but `heeded` can fire on every
@@ -1237,6 +1273,8 @@ export interface RecomputedCounters {
   recurrence_count?: number;
   predicted_count?: number;
   predict_hits?: number;
+  /** Heed-rate credit model Option A (2026-08-29) — see CorrectionRecord.not_violated_count. */
+  not_violated_count?: number;
   last_retrieved?: string;
   last_outcome?: string;
   last_predicted?: string;
@@ -1245,13 +1283,21 @@ export interface RecomputedCounters {
   proof_confidence?: number;
 }
 
-/** Outcome kinds that affect per-correction counters (mirrors recordOutcome's early-return for triggered/not_triggered/unknown — those are ledger-only). */
+/**
+ * Outcome kinds that affect per-correction counters (mirrors recordOutcome's
+ * early-return for triggered/not_triggered/unknown — those are ledger-only).
+ * "not_violated" (heed-design Option A, 2026-08-29) DOES affect a counter
+ * (its own `not_violated_count`) and so belongs here, participating in the
+ * locked read-modify-write and in `ar outcomes rebuild` replay — it is NOT
+ * one of recordOutcome's ledger-only early-return kinds.
+ */
 const COUNTER_KINDS = new Set<CorrectionOutcome["kind"]>([
   "retrieved",
   "heeded",
   "recurred",
   "predicted",
   "predict_hit",
+  "not_violated",
 ]);
 
 /**
@@ -1320,6 +1366,7 @@ export function recomputeCorrectionCounters(
   let recurrence: number | undefined;
   let predicted: number | undefined;
   let predictHits: number | undefined;
+  let notViolated: number | undefined;
   let lastRetrieved: string | undefined;
   let lastOutcome: string | undefined;
   let lastPredicted: string | undefined;
@@ -1346,6 +1393,11 @@ export function recomputeCorrectionCounters(
       lastPredicted = evt.at;
     } else if (evt.kind === "predict_hit") {
       predictHits = (predictHits ?? 0) + 1;
+    } else if (evt.kind === "not_violated") {
+      // Own counter, seeded only on its own event (mirrors predicted/predict_hit's
+      // pattern) — see recordOutcome's matching branch for the same asymmetry.
+      notViolated = (notViolated ?? 0) + 1;
+      lastOutcome = evt.at;
     }
   }
 
@@ -1375,6 +1427,7 @@ export function recomputeCorrectionCounters(
     recurrence_count: recurrence,
     predicted_count: predicted,
     predict_hits: predictHits,
+    not_violated_count: notViolated,
     last_retrieved: lastRetrieved,
     last_outcome: lastOutcome,
     last_predicted: lastPredicted,
@@ -1464,6 +1517,7 @@ function currentCountersOf(r: CorrectionRecord): RecomputedCounters {
     recurrence_count: r.recurrence_count,
     predicted_count: r.predicted_count,
     predict_hits: r.predict_hits,
+    not_violated_count: r.not_violated_count,
     last_retrieved: r.last_retrieved,
     last_outcome: r.last_outcome,
     last_predicted: r.last_predicted,
@@ -1479,6 +1533,7 @@ const COUNTER_FIELD_NAMES: readonly (keyof RecomputedCounters)[] = [
   "recurrence_count",
   "predicted_count",
   "predict_hits",
+  "not_violated_count",
   "last_retrieved",
   "last_outcome",
   "last_predicted",
@@ -1628,6 +1683,7 @@ export function runOutcomesRebuild(
         recurrence_count: entry.after.recurrence_count,
         predicted_count: entry.after.predicted_count,
         predict_hits: entry.after.predict_hits,
+        not_violated_count: entry.after.not_violated_count,
         last_retrieved: entry.after.last_retrieved,
         last_outcome: entry.after.last_outcome,
         last_predicted: entry.after.last_predicted,
@@ -2040,6 +2096,7 @@ export function getCorrectionKPIs(project: string, preloaded?: CorrectionRecord[
   let retrieved = 0;
   let heeded = 0;
   let recurred = 0;
+  let notViolated = 0;
   const noise: CorrectionKPI["noise_candidates"] = [];
   const hot: CorrectionKPI["high_signal"] = [];
 
@@ -2047,6 +2104,9 @@ export function getCorrectionKPIs(project: string, preloaded?: CorrectionRecord[
     retrieved += r.retrieved_count ?? 0;
     heeded += r.heeded_count ?? 0;
     recurred += r.recurrence_count ?? 0;
+    // Heed-rate credit model Option A (2026-08-29): summed for VISIBILITY
+    // only — NEVER folded into heeded/recurred/precision above.
+    notViolated += r.not_violated_count ?? 0;
     const p = r.precision ?? null;
     const ret = r.retrieved_count ?? 0;
     if (p !== null && ret >= 3 && p < 0.3) {
@@ -2110,6 +2170,7 @@ export function getCorrectionKPIs(project: string, preloaded?: CorrectionRecord[
     triggered_count: triggeredCount,
     unknown_count: unknownCount,
     not_triggered_count: notTriggeredCount,
+    not_violated_count: notViolated,
   };
 }
 

@@ -12,10 +12,20 @@
  * is the foundation for measuring firing rate and duplicate-suppression rate.
  *
  * PRIVACY: counters + identifiers only. NEVER transcript content, summaries,
- * correction text, or insight titles. `host_tier` is the raw AR_HOST env
- * string (or "unknown") — a sibling worker owns the full host-profile
- * classification; this module deliberately does NOT import it, to avoid
- * coupling two in-flight work packages.
+ * correction text, or insight titles. `host_tier` is the resolved lifecycle-
+ * capability tier ("A"|"B"|"C") from `resolveHostProfile()` (host-profile.ts).
+ *
+ * Wiring note (2026-08-29, Wave 0 measurement fix): this module used to write
+ * the RAW `AR_HOST` env value directly (defaulting to "unknown" whenever
+ * AR_HOST was unset), with a comment deferring to host-profile.ts "to avoid
+ * coupling two in-flight work packages." That sibling work has since shipped
+ * and merged — host-profile.ts's `resolveHostProfile()` is the single
+ * canonical 3-tier classifier (explicit AR_HOST → known-host table →
+ * CLAUDECODE/CLAUDE_CODE_* inference → conservative Tier B default) used
+ * everywhere else lifecycle-tier matters (isHookOwnedHost, MCP server
+ * `instructions`). Importing it here closes the "100% unknown" blind spot:
+ * every row now carries a real tier, including the inferred default, never
+ * the literal string "unknown".
  *
  * Storage: append-only JSONL at <root>/telemetry/lifecycle.jsonl. Rotates to
  * a single `.1` generation when the live file exceeds 1MB (simple, documented
@@ -26,6 +36,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getRoot } from "../types.js";
 import { ensureDir } from "./fs-utils.js";
+import { resolveHostProfile } from "../host-profile.js";
 
 export type LifecycleEvent = "session_start" | "session_end" | "remember" | "check";
 
@@ -33,7 +44,12 @@ export interface LifecycleTelemetryRow {
   event: LifecycleEvent;
   sessionId: string;
   project: string;
-  /** Raw AR_HOST env value, or "unknown" when unset. Never classified here. */
+  /**
+   * Resolved lifecycle-capability tier ("A"|"B"|"C") from
+   * `resolveHostProfile().tier` — NEVER the literal string "unknown" (that
+   * was the pre-2026-08-29 bug: this field silently defaulted to "unknown"
+   * whenever AR_HOST wasn't explicitly set, which was effectively always).
+   */
   host_tier: string;
   /** ISO timestamp of the call. */
   at: string;
@@ -94,7 +110,7 @@ export function recordLifecycleEvent(
       event,
       sessionId,
       project,
-      host_tier: process.env["AR_HOST"] ?? "unknown",
+      host_tier: resolveHostProfile().tier,
       at: new Date().toISOString(),
       dup,
     };
