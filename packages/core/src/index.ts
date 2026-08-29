@@ -687,11 +687,34 @@ export type { WorkingMemoryLine, WorkingMemoryFileInfo } from "./storage/working
 
 // Wave 1 retrieval pipeline (2026-08-29, reports/2026-08-29-pipe-w1-readers-report.md,
 // plywood SOP 58053587) — shared tier reader with identity-trust tagging baked in.
-// Purely additive: no existing call site imports from here yet (Wave 2+ migration).
-export { readTierCandidates } from "./retrieval/candidates.js";
+//
+// W2 independent-review fix (2026-08-30, reports/2026-08-30-pipe-w2-fixes-report.md):
+// `readTierCandidates` is now safe-by-default (drops untrusted candidates
+// unless `includeUntrusted: true` is passed) — a direct caller no longer
+// needs to know about `untrusted` at all to get trusted-only content.
+// `filterTrusted` is the same canonical trust predicate this default
+// delegates to, exported so a caller that legitimately needs
+// `includeUntrusted: true` (or any other pre-fetched MemoryCandidate[]) has
+// a public, correct way to filter — not a private implementation detail a
+// second surface would have to reinvent.
+export { readTierCandidates, filterTrusted } from "./retrieval/candidates.js";
 export type {
   MemoryCandidate,
   MemoryTier,
   CandidateSourceKind,
   ReadTierCandidatesOpts,
 } from "./retrieval/candidates.js";
+
+// Wave 2 retrieval pipeline (2026-08-30, reports/2026-08-29-pipe-w2-query-report.md,
+// plywood SOP ecbd4351) — queryMemory() as a MANDATORY pipeline (fetch ->
+// trust-filter -> tokenize+score -> scope -> rank/fuse -> fence). smart_recall
+// is migrated onto this this wave; journalSearch/palaceSearch/recallInsight/
+// resurrect/session_start remain on their own paths until Wave 3.
+export { queryMemory, queryArchiveFallback } from "./retrieval/query-memory.js";
+export type {
+  QueryMemoryTier,
+  QueryMemorySource,
+  QueryMemoryItem,
+  QueryMemoryInput,
+  QueryMemoryResult,
+} from "./retrieval/query-memory.js";
