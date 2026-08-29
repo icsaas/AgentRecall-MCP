@@ -684,3 +684,14 @@ export {
   WM_ORPHAN_WINDOW_MS,
 } from "./storage/working-memory.js";
 export type { WorkingMemoryLine, WorkingMemoryFileInfo } from "./storage/working-memory.js";
+
+// Wave 1 retrieval pipeline (2026-08-29, reports/2026-08-29-pipe-w1-readers-report.md,
+// plywood SOP 58053587) — shared tier reader with identity-trust tagging baked in.
+// Purely additive: no existing call site imports from here yet (Wave 2+ migration).
+export { readTierCandidates } from "./retrieval/candidates.js";
+export type {
+  MemoryCandidate,
+  MemoryTier,
+  CandidateSourceKind,
+  ReadTierCandidatesOpts,
+} from "./retrieval/candidates.js";
