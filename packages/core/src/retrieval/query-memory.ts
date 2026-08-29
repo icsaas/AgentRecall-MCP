@@ -105,8 +105,7 @@
  *      iterates `readTierCandidates`'s already-date-sorted-descending live
  *      half first — a characterized IMPROVEMENT (more predictable, favors
  *      recency, matches the tier's own Ebbinghaus-decay intent), not a
- *      silent behavior change; identical output whenever total matches <=
- *      limit (the common case). CORRECTION (independent review, W2,
+ *      silent behavior change. CORRECTION (independent review, W2,
  *      2026-08-30): this file's initial cut only sorted the live half — the
  *      rollup-archive half (candidates.ts) and the legacy-journal half
  *      (`readLegacyJournalCandidates` below) were still built in raw,
@@ -115,6 +114,19 @@
  *      arbitrary subset rather than the newest. Both halves are now ALSO
  *      sorted date-descending before concatenation — the sort-before-
  *      truncate class is closed across live AND archive (and legacy).
+ *      SCOPE OF EQUIVALENCE (independent review, W2, 2026-08-30): this
+ *      archive/legacy date-desc sort is an INTENTIONAL ranking change, and
+ *      it is NOT order-preserving even below the truncation limit. When two
+ *      candidates carry TIED per-tier scores (realistic for similarly-aged
+ *      archive entries whose Ebbinghaus-decay scores coincide), `applyRRF`'s
+ *      rank/`score` is decided by array position, so re-sorting the archive
+ *      half changes the tie-break order — and the resulting numeric RRF
+ *      `score` — of the tied items, even when nothing is truncated. This is
+ *      a deterministic recency-favoring improvement over the prior
+ *      arbitrary-filesystem-order tie-break, NOT a byte-identical no-op.
+ *      Only STEP 1 (the `includeUntrusted` reconciliation below) is
+ *      byte-identical; this sort is not, and the report's equivalence
+ *      section is scoped accordingly.
  *   3. Legacy journal directory (`~/.claude/projects/<entry>/memory/journal/` —
  *      `storage/paths.ts`'s `journalDirs()` legacy-fallback branch): Wave 1's
  *      `readTierCandidates` does NOT cover this (confirmed by reading
@@ -346,10 +358,12 @@ function lineMatchesQuery(line: string, keywords: string[]): boolean {
 // safe-by-default drop is bypassed here on purpose, because this pipeline
 // stage is the mandatory, non-bypassable place that decision belongs;
 // keeping BOTH the reader's own default-safe boundary AND this stage intact
-// preserves queryMemory()'s exact pre-existing ranking (byte-identical —
-// see this wave's report for the smartRecall() equivalence proof) while
-// closing the direct-caller escape hatch a naive `readTierCandidates()`
-// caller previously had.
+// preserves queryMemory()'s exact pre-existing ranking, byte-identical, for
+// THIS reconciliation (the `includeUntrusted` relocation — STEP 1; see this
+// wave's report for the smartRecall() equivalence proof) while closing the
+// direct-caller escape hatch a naive `readTierCandidates()` caller previously
+// had. (The separate archive/legacy date-desc sort — MEDIUM-1 — is NOT
+// byte-identical under tied per-tier scores; see CHALLENGE (c)-2 above.)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
