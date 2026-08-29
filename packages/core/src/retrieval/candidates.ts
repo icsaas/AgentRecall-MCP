@@ -46,7 +46,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { journalDir, archiveRawDir, palaceDir } from "../storage/paths.js";
 import { listJournalFiles } from "../helpers/journal-files.js";
-import { isRescueSourcedContent } from "../helpers/journal-filter.js";
+import { isRescueSourcedContent, extractFrontmatterSource } from "../helpers/journal-filter.js";
 import { listRooms } from "../palace/rooms.js";
 
 /**
@@ -84,7 +84,29 @@ export interface MemoryCandidate {
   tier: MemoryTier;
   /** Project slug this candidate belongs to (assumed already resolved by the caller — this function does not call resolveProject). */
   project: string;
-  /** Best-effort ISO date (YYYY-MM-DD) for this candidate — from the filename's date prefix for journal candidates, from file mtime for palace-room candidates (rooms carry no per-file date of their own; see countRoomEntries's own per-entry-not-per-file granularity note in palace/rooms.ts). Empty string when undeterminable. */
+  /**
+   * Best-effort ISO date (YYYY-MM-DD) for this candidate. **Semantics differ
+   * by `tier` — this is NOT one consistent notion of "date" across the
+   * type**, and a future consumer that compares/sorts across tiers must not
+   * assume otherwise (independent review fix, 2026-08-29, plywood SOP
+   * 58053587 — flagged as under-documented at the type level, only present
+   * inline per-reader before this fix):
+   *
+   * - `tier: "journal"` — the FILENAME's date prefix (`YYYY-MM-DD--...`,
+   *   or the leading `YYYY-MM-DD` match on an archive filename). This is the
+   *   date the entry was AUTHORED/FILED, fixed at write time, independent of
+   *   any later edit.
+   * - `tier: "palace-room"` — the file's `mtime` (falling back to
+   *   `RoomMeta.updated` if `stat()` fails), because room files carry no
+   *   per-file authored-date of their own (rooms are living documents that
+   *   get appended/edited in place — see `countRoomEntries`'s own
+   *   per-entry-not-per-file granularity note in `palace/rooms.ts`). This is
+   *   the date the file was LAST MODIFIED, which can drift forward every
+   *   time an entry is added to an existing room file — the opposite
+   *   stability property from the journal tier's fixed filename date.
+   *
+   * Empty string when undeterminable for either tier.
+   */
   date: string;
   /** Absolute filesystem path this candidate was read from — the provenance field every caller needs for backlink resolution, dedup, or audit. */
   sourcePath: string;
@@ -103,6 +125,49 @@ export interface MemoryCandidate {
    * prior waves each missed same-class members" failure pattern).
    */
   untrusted: boolean;
+  /**
+   * The RAW frontmatter `source:` value this candidate's content carries
+   * (e.g. `"hook-end"`, `"working-memory-rescue"`), via
+   * `helpers/journal-filter.ts`'s `extractFrontmatterSource` — the same
+   * value `untrusted` above is derived FROM (`isRescueSourceTag(sourceTag)`),
+   * kept alongside it rather than reduced away.
+   *
+   * Independent review fix (2026-08-29, plywood SOP 58053587): `untrusted`
+   * answers one cheap binary question ("is this rescue-sourced") and every
+   * existing/near-term consumer should keep using it for that. `sourceTag`
+   * preserves the full provenance string so a LATER wave's finer
+   * trust/supersession stage (e.g. distinguishing multiple non-rescue
+   * `source` values, or a future tag this file's author hasn't invented yet)
+   * can branch on it WITHOUT re-parsing frontmatter per surface — exactly
+   * the anti-pattern (independent re-parsing at each retrieval surface)
+   * this whole module exists to kill. `undefined` when the candidate has no
+   * frontmatter block, or no `source:` field within it (e.g. a legacy file
+   * predating the frontmatter convention) — the SAME "absent" case
+   * `isRescueSourceTag(undefined)` already treats as `false`/trusted, so
+   * `untrusted` and `sourceTag` never disagree about a missing tag.
+   */
+  sourceTag?: string;
+  /**
+   * Forward-compatible bag for already-parsed frontmatter fields a LATER
+   * wave's score stage will consume instead of re-parsing frontmatter per
+   * surface (independent review fix, 2026-08-29, plywood SOP 58053587 —
+   * the kickoff plan named a `scoreInputs` field this shipped type omitted;
+   * CHALLENGED and resolved as `meta`, see this file's own PR report for the
+   * full reasoning). Deliberately a `Record<string,string>` bag, not a typed
+   * struct with named fields (`tag`/`salience`/…): Wave 1's reader parses
+   * NOTHING from frontmatter beyond `source` (already surfaced via
+   * `sourceTag` above) — it has no basis to invent a schema for fields it
+   * doesn't read, and a fixed struct would force this wave to guess Wave 2's
+   * scoring inputs rather than let Wave 2 add fields incrementally without
+   * changing `MemoryCandidate`'s shape each time. THE READER'S JOB IS FETCH,
+   * NOT SCORING: this field exists so a future frontmatter-field addition
+   * has somewhere to land without re-opening this type — it is NOT a place
+   * to pre-compute scores, salience, or ranking signals. Left `undefined`
+   * on every candidate this wave (no call site below sets it) — a real,
+   * documented "possibly-empty-now" placeholder, not a silently-broken
+   * promise.
+   */
+  meta?: Record<string, string>;
   /** Room slug — present only for `tier: "palace-room"` candidates. */
   room?: string;
 }
@@ -176,6 +241,7 @@ function readJournalCandidates(project: string, opts: ReadTierCandidatesOpts): M
       file: entry.file,
       sourceKind: "journal-live",
       untrusted: isRescueSourcedContent(content),
+      sourceTag: extractFrontmatterSource(content),
     });
   }
 
@@ -214,6 +280,7 @@ function readJournalCandidates(project: string, opts: ReadTierCandidatesOpts): M
         file,
         sourceKind: "journal-rollup-archive",
         untrusted: isRescueSourcedContent(content),
+        sourceTag: extractFrontmatterSource(content),
       });
     }
   }
@@ -241,6 +308,7 @@ function readJournalCandidates(project: string, opts: ReadTierCandidatesOpts): M
         file,
         sourceKind: "journal-archive-raw",
         untrusted: isRescueSourcedContent(content),
+        sourceTag: extractFrontmatterSource(content),
       });
     }
   }
@@ -297,6 +365,7 @@ function readPalaceRoomCandidates(project: string, opts: ReadTierCandidatesOpts)
         file,
         sourceKind: "palace-room",
         untrusted: isRescueSourcedContent(content),
+        sourceTag: extractFrontmatterSource(content),
         room: roomMeta.slug,
       });
     }

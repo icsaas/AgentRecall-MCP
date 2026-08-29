@@ -161,6 +161,58 @@ describe("retrieval/candidates.ts — readTierCandidates", () => {
       assert.equal(genuine.untrusted, false, "a hook-end-sourced card must not be tagged untrusted");
       assert.equal(rescued.untrusted, true, "a working-memory-rescue-sourced card must be tagged untrusted");
     });
+
+    // Independent review fix (2026-08-29, plywood SOP 58053587): sourceTag
+    // must carry the RAW frontmatter source value alongside (not instead of)
+    // the untrusted boolean — a rescue candidate must be BOTH sourceTag
+    // "working-memory-rescue" AND untrusted:true; a hook-end candidate must
+    // be BOTH sourceTag "hook-end" AND untrusted:false.
+    it("preserves the raw frontmatter source value on sourceTag, alongside (not instead of) the untrusted boolean", () => {
+      const jdir = core.journalDir(PROJECT);
+      fs.mkdirSync(jdir, { recursive: true });
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-29--card--sourcetag-genuine.md"),
+        ["---", "source: hook-end", "---", "", "# genuine card", "SOURCETAG_GENUINE_TERM"].join("\n"),
+        "utf-8",
+      );
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-29--card--sourcetag-rescued.md"),
+        ["---", "source: working-memory-rescue", "---", "", "# rescued card", "SOURCETAG_RESCUED_TERM"].join("\n"),
+        "utf-8",
+      );
+
+      const candidates = core.readTierCandidates("journal", PROJECT);
+      const genuine = candidates.find((c) => c.content.includes("SOURCETAG_GENUINE_TERM"));
+      const rescued = candidates.find((c) => c.content.includes("SOURCETAG_RESCUED_TERM"));
+      assert.ok(genuine && rescued, "both fixture files must be discoverable as candidates");
+
+      assert.equal(genuine.sourceTag, "hook-end", "a hook-end-sourced card's sourceTag must carry the raw value");
+      assert.equal(genuine.untrusted, false, "the same hook-end candidate must still be untrusted:false");
+
+      assert.equal(rescued.sourceTag, "working-memory-rescue", "a rescue-sourced card's sourceTag must carry the raw value");
+      assert.equal(rescued.untrusted, true, "the same rescue candidate must still be untrusted:true");
+    });
+
+    // Independent review fix (2026-08-29, plywood SOP 58053587): meta is a
+    // forward-compatible placeholder Wave 1 does not populate (the reader
+    // parses nothing beyond source+date from frontmatter this wave) — it
+    // must be present in the type (no consumer needs a cast to reference
+    // it) but left undefined, a documented "possibly-empty-now" contract,
+    // not a silently-broken promise of populated scoring inputs.
+    it("carries an optional, currently-unpopulated meta field (forward-compatible placeholder, not pre-computed scores)", () => {
+      const jdir = core.journalDir(PROJECT);
+      fs.mkdirSync(jdir, { recursive: true });
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-29--card--meta-demo.md"),
+        ["---", "source: hook-end", "---", "", "# meta demo", "META_DEMO_UNIQUE_TERM"].join("\n"),
+        "utf-8",
+      );
+
+      const candidates = core.readTierCandidates("journal", PROJECT);
+      const demo = candidates.find((c) => c.content.includes("META_DEMO_UNIQUE_TERM"));
+      assert.ok(demo, "fixture file must be discoverable as a candidate");
+      assert.equal(demo.meta, undefined, "Wave 1 must not populate meta — it is a Wave 2+ forward-compatible placeholder only");
+    });
   });
 
   // ── palace-room tier ─────────────────────────────────────────────────────
@@ -254,6 +306,11 @@ describe("retrieval/candidates.ts — readTierCandidates", () => {
       assert.ok(genuine && rescued, "both fixture topic files must be discoverable as candidates");
       assert.equal(genuine.untrusted, false, "a hook-end-sourced room file must not be tagged untrusted");
       assert.equal(rescued.untrusted, true, "a working-memory-rescue-sourced room file must be tagged untrusted (defense-in-depth — see harness allowlist reasoning for why this shouldn't occur via the live write path today, but the READER must not assume that forever)");
+      // Independent review fix (2026-08-29, plywood SOP 58053587): sourceTag
+      // must be populated identically for the palace-room tier (same
+      // extractFrontmatterSource call as the journal tier).
+      assert.equal(genuine.sourceTag, "hook-end", "a hook-end-sourced room file's sourceTag must carry the raw value");
+      assert.equal(rescued.sourceTag, "working-memory-rescue", "a rescue-sourced room file's sourceTag must carry the raw value");
     });
   });
 });

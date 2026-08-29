@@ -109,8 +109,19 @@ export function isRescueSourceTag(source: unknown): boolean {
  * minimal — same `---\n...\n---` delimiter convention `parseMemoryFile`
  * itself parses (`storage/session-card.ts`'s `generateFrontmatter` is the
  * only writer of this shape).
+ *
+ * Exported (Wave 1 retrieval-pipeline fix, 2026-08-29, plywood SOP 58053587)
+ * so `retrieval/candidates.ts` can carry the RAW tag forward on
+ * `MemoryCandidate.sourceTag`, not just the boolean `isRescueSourcedContent`
+ * reduction — `untrusted` answers "is this rescue-sourced" (cheap, binary,
+ * used everywhere today); `sourceTag` answers "what does this file's
+ * `source:` field actually say" (e.g. `"hook-end"`, `"working-memory-rescue"`,
+ * or any future tag), which Wave 2/3's finer trust/supersession stages need
+ * and would otherwise have to re-parse frontmatter to get. Zero extra I/O:
+ * the value is already computed inline by every call site that also
+ * computes `untrusted`.
  */
-function extractFrontmatterSource(content: string): string | undefined {
+export function extractFrontmatterSource(content: string): string | undefined {
   if (!content.startsWith("---")) return undefined;
   const endIdx = content.indexOf("---", 3);
   if (endIdx < 0) return undefined;
