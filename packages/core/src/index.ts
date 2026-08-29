@@ -695,3 +695,17 @@ export type {
   CandidateSourceKind,
   ReadTierCandidatesOpts,
 } from "./retrieval/candidates.js";
+
+// Wave 2 retrieval pipeline (2026-08-30, reports/2026-08-29-pipe-w2-query-report.md,
+// plywood SOP ecbd4351) — queryMemory() as a MANDATORY pipeline (fetch ->
+// trust-filter -> tokenize+score -> scope -> rank/fuse -> fence). smart_recall
+// is migrated onto this this wave; journalSearch/palaceSearch/recallInsight/
+// resurrect/session_start remain on their own paths until Wave 3.
+export { queryMemory, queryArchiveFallback } from "./retrieval/query-memory.js";
+export type {
+  QueryMemoryTier,
+  QueryMemorySource,
+  QueryMemoryItem,
+  QueryMemoryInput,
+  QueryMemoryResult,
+} from "./retrieval/query-memory.js";

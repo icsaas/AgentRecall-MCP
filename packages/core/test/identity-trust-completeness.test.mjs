@@ -174,12 +174,23 @@ const ALLOWLIST = {
     "never contains that heading); (b) merge-suggestion keyword-overlap scan whose " +
     "output (`MergeSuggestion`) carries only a filename + keyword LIST + a templated " +
     "reason string — never the raw file excerpt itself.",
-  "tools-logic/smart-recall.ts":
-    "its own direct readFileSync (the explicit 'archive' source, smart-recall.ts's " +
-    "own P0-a comment) targets archiveRawDir() only — the raw tier rescue cards never " +
-    "touch. Its JOURNAL source is entirely delegated to journalSearch() (this module's " +
-    "OWN import), which is itself the fixed choke-calling surface — smart-recall.ts " +
-    "has no separate journalDir() content read of its own.",
+  "retrieval/query-memory.ts":
+    "(Wave 2, 2026-08-30, plywood SOP ecbd4351) TEXT-HEURISTIC FALSE POSITIVE: this " +
+    "file's only literal occurrences of `journalDirs(`/`archiveRawDir(` are inside doc " +
+    "comments describing OTHER functions' behavior for context (e.g. explaining why " +
+    "`scoreJournalTier` defaults `includeRollupArchive:true` to match `journalSearch()`'s " +
+    "own `journalDirs(slug,true)` call) — grep-verified zero EXECUTABLE call to either " +
+    "function anywhere in this file. Every journal candidate this file's `queryMemory()` " +
+    "pipeline touches (live, rollup-archive, and raw-archive) comes from " +
+    "`readTierCandidates()` (Wave 1's sanctioned reader, which already calls the choke " +
+    "internally) via this file's own `trustFilter()` (filters `candidate.untrusted` " +
+    "BEFORE any scoring/matching touches content) — this file does not re-derive trust " +
+    "itself because the upstream reader already computed it correctly; re-parsing " +
+    "frontmatter here would be duplicated work, not additional safety. The one exception " +
+    "— `readLegacyJournalCandidates()`'s small, self-contained legacy-directory read — " +
+    "sets `untrusted:false` deliberately (documented inline): legacy pre-package content " +
+    "predates the working-memory-rescue mechanism's existence entirely, so it structurally " +
+    "cannot carry a `source: working-memory-rescue` tag.",
 };
 
 const MIN_REASON_LENGTH = 40;
@@ -454,8 +465,19 @@ const ALLOWLIST_PALACE = {
     "already documents).",
   "tools-logic/smart-recall.ts":
     "(SAFE) its only palaceDir() use is a graph-edge lookup (getConnectedRooms, for the 1-hop related-" +
-    "room walk) — never a content read; every readFileSync in this file targets archiveRawDir() (already " +
-    "covered by this file's Part B allowlist entry), never room content.",
+    "room walk) — never a content read. Wave 2 (2026-08-30) removed this file's OWN archiveRawDir() " +
+    "readFileSync entirely (moved to retrieval/query-memory.ts's queryArchiveFallback, see that file's " +
+    "own allowlist entry below) — the only readFileSync remaining in this file targets feedback-log.json " +
+    "(a JSON bookkeeping file for the Beta-feedback multiplier), never room or journal content.",
+  "retrieval/query-memory.ts":
+    "(SAFE) `listRooms(project)` is used ONLY to build a room-slug -> salience METADATA map " +
+    "(`scorePalaceTier`'s salience blend, mirroring palace-search.ts's own `roomMeta.salience` read) — " +
+    "it returns RoomMeta objects (slug/salience/etc.), never file content. Actual room-file CONTENT comes " +
+    "exclusively from `readTierCandidates(\"palace-room\", ...)` (Wave 1's sanctioned reader, choke already " +
+    "applied at fetch time) via this file's own `trustFilter()`, which runs BEFORE any per-line matching " +
+    "touches a candidate's content — this is the SANCTIONED pattern Wave 1/2 exist to establish, not a gap. " +
+    "(This file has no `palaceDir(` call at all this scanner's alternation could match — only the one " +
+    "genuine `listRooms()` metadata call above trips PALACE_RISK_PATTERN.)",
 };
 
 const MIN_PALACE_REASON_LENGTH = 40;
