@@ -154,7 +154,11 @@ describe("retrieval/candidates.ts — readTierCandidates", () => {
         "utf-8",
       );
 
-      const candidates = core.readTierCandidates("journal", PROJECT);
+      // includeUntrusted:true — this test inspects the `untrusted` FLAG
+      // itself on a rescue-tagged candidate, which the W2 safe-by-default
+      // fix now drops entirely under the plain default call (see the
+      // "safe by default" describe block below for that behavior).
+      const candidates = core.readTierCandidates("journal", PROJECT, { includeUntrusted: true });
       const genuine = candidates.find((c) => c.content.includes("GENUINE_UNIQUE_TERM"));
       const rescued = candidates.find((c) => c.content.includes("RESCUED_UNIQUE_TERM"));
       assert.ok(genuine && rescued, "both fixture files must be discoverable as candidates");
@@ -181,7 +185,8 @@ describe("retrieval/candidates.ts — readTierCandidates", () => {
         "utf-8",
       );
 
-      const candidates = core.readTierCandidates("journal", PROJECT);
+      // includeUntrusted:true — see the previous test's comment.
+      const candidates = core.readTierCandidates("journal", PROJECT, { includeUntrusted: true });
       const genuine = candidates.find((c) => c.content.includes("SOURCETAG_GENUINE_TERM"));
       const rescued = candidates.find((c) => c.content.includes("SOURCETAG_RESCUED_TERM"));
       assert.ok(genuine && rescued, "both fixture files must be discoverable as candidates");
@@ -300,7 +305,9 @@ describe("retrieval/candidates.ts — readTierCandidates", () => {
         "utf-8",
       );
 
-      const candidates = core.readTierCandidates("palace-room", PROJECT, { room: "trust-room" });
+      // includeUntrusted:true — see the journal-tier trust-tagging test's
+      // comment above for why (W2 safe-by-default fix).
+      const candidates = core.readTierCandidates("palace-room", PROJECT, { room: "trust-room", includeUntrusted: true });
       const genuine = candidates.find((c) => c.content.includes("GENUINE_ROOM_TERM"));
       const rescued = candidates.find((c) => c.content.includes("RESCUED_ROOM_TERM"));
       assert.ok(genuine && rescued, "both fixture topic files must be discoverable as candidates");
@@ -311,6 +318,96 @@ describe("retrieval/candidates.ts — readTierCandidates", () => {
       // extractFrontmatterSource call as the journal tier).
       assert.equal(genuine.sourceTag, "hook-end", "a hook-end-sourced room file's sourceTag must carry the raw value");
       assert.equal(rescued.sourceTag, "working-memory-rescue", "a rescue-sourced room file's sourceTag must carry the raw value");
+    });
+  });
+
+  // ── W2 independent-review fix (T1, HIGH) — readTierCandidates() is safe by
+  // default ────────────────────────────────────────────────────────────────
+  // Before this fix, `readTierCandidates()` was a PUBLIC, exported escape
+  // hatch: a direct caller (which this file's own header literally instructs
+  // a future retrieval surface to become) got raw, unfiltered candidates
+  // back — `untrusted` was a mere FIELD, never enforced — reopening the
+  // CRITICAL-2 rescue-quarantine injection gap this whole retrieval-pipeline
+  // effort exists to close, one function further down than `queryMemory()`.
+  describe("W2 independent-review fix — readTierCandidates() default call drops untrusted candidates (HIGH)", () => {
+    const JOURNAL_PROJECT = "candidates-safe-default-journal-demo";
+    const PALACE_PROJECT = "candidates-safe-default-palace-demo";
+
+    it("journal tier: default call drops a rescue-tagged candidate; includeUntrusted:true still returns it (flagged); a non-rescue sourceTag candidate is KEPT under the default", () => {
+      const jdir = core.journalDir(JOURNAL_PROJECT);
+      fs.mkdirSync(jdir, { recursive: true });
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-30--card--safe-default-rescued.md"),
+        ["---", "source: working-memory-rescue", "---", "", "SAFE_DEFAULT_RESCUED_TERM"].join("\n"),
+        "utf-8",
+      );
+      // Non-rescue sourceTag ("hook-end") — must be KEPT under the default:
+      // sourceTag is a down-tier/attribution axis, never a drop axis;
+      // dropping it too would lose genuine, merely-attributed content.
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-30--card--safe-default-tagged.md"),
+        ["---", "source: hook-end", "---", "", "SAFE_DEFAULT_TAGGED_TERM"].join("\n"),
+        "utf-8",
+      );
+
+      const defaultCandidates = core.readTierCandidates("journal", JOURNAL_PROJECT);
+      assert.ok(
+        !defaultCandidates.some((c) => c.content.includes("SAFE_DEFAULT_RESCUED_TERM")),
+        "default call (no opts) must NOT return a rescue-tagged candidate at all — this is the whole point of the HIGH fix",
+      );
+      const taggedDefault = defaultCandidates.find((c) => c.content.includes("SAFE_DEFAULT_TAGGED_TERM"));
+      assert.ok(taggedDefault, "a non-rescue sourceTag candidate must still be returned under the default");
+      assert.equal(taggedDefault.sourceTag, "hook-end");
+      assert.equal(taggedDefault.untrusted, false);
+
+      const withUntrusted = core.readTierCandidates("journal", JOURNAL_PROJECT, { includeUntrusted: true });
+      const rescuedFlagged = withUntrusted.find((c) => c.content.includes("SAFE_DEFAULT_RESCUED_TERM"));
+      assert.ok(rescuedFlagged, "includeUntrusted:true must still return the rescue-tagged candidate");
+      assert.equal(rescuedFlagged.untrusted, true, "...correctly flagged untrusted:true, not silently trusted");
+    });
+
+    it("palace-room tier: default call drops a rescue-tagged room file; includeUntrusted:true still returns it (flagged)", () => {
+      core.ensurePalaceInitialized(PALACE_PROJECT);
+      core.createRoom(PALACE_PROJECT, "safe-default-room", "Safe Default Room", "fixture", []);
+      const pd = core.palaceDir(PALACE_PROJECT);
+      const roomPath = path.join(pd, "rooms", "safe-default-room");
+      fs.writeFileSync(
+        path.join(roomPath, "rescued.md"),
+        ["---", "source: working-memory-rescue", "---", "", "SAFE_DEFAULT_PALACE_RESCUED_TERM"].join("\n"),
+        "utf-8",
+      );
+
+      const defaultCandidates = core.readTierCandidates("palace-room", PALACE_PROJECT, { room: "safe-default-room" });
+      assert.ok(
+        !defaultCandidates.some((c) => c.content.includes("SAFE_DEFAULT_PALACE_RESCUED_TERM")),
+        "default call must NOT return a rescue-tagged room-file candidate",
+      );
+
+      const withUntrusted = core.readTierCandidates("palace-room", PALACE_PROJECT, {
+        room: "safe-default-room",
+        includeUntrusted: true,
+      });
+      const rescuedFlagged = withUntrusted.find((c) => c.content.includes("SAFE_DEFAULT_PALACE_RESCUED_TERM"));
+      assert.ok(rescuedFlagged, "includeUntrusted:true must still return it");
+      assert.equal(rescuedFlagged.untrusted, true);
+    });
+  });
+
+  // ── T3 — filterTrusted() is a real, publicly exported, discriminating
+  // predicate (not a private implementation detail duplicated per surface) ──
+  describe("filterTrusted() — the canonical, publicly exported trust predicate", () => {
+    it("is exported from the built package; drops untrusted:true; keeps untrusted:false AND untrusted:undefined", () => {
+      assert.equal(typeof core.filterTrusted, "function", "filterTrusted must be exported from the package");
+      const candidates = [
+        { untrusted: true, tag: "drop-explicit-true" },
+        { untrusted: false, tag: "keep-explicit-false" },
+        { tag: "keep-undefined" }, // untrusted omitted entirely — must be treated as trusted
+      ];
+      const kept = core.filterTrusted(candidates);
+      const keptTags = kept.map((c) => c.tag);
+      assert.ok(!keptTags.includes("drop-explicit-true"), "must drop untrusted:true");
+      assert.ok(keptTags.includes("keep-explicit-false"), "must keep untrusted:false");
+      assert.ok(keptTags.includes("keep-undefined"), "must keep a candidate with no untrusted field at all — undefined is not === true");
     });
   });
 });

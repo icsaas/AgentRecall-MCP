@@ -95,7 +95,12 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
 
       // Precondition: the fixture is genuinely discoverable content (proves
       // this isn't passing merely because the file is unreadable/absent).
-      const rawCandidates = core.readTierCandidates("palace-room", PROJECT, { room: "hijack-room" });
+      // includeUntrusted:true — readTierCandidates() is now safe-by-default
+      // (W2 independent-review fix), so this precondition check (which
+      // deliberately wants to see the RAW untrusted candidate to prove the
+      // fixture itself is real) must opt in explicitly; the actual behavior
+      // under test below (smart_recall via queryMemory()) does NOT opt in.
+      const rawCandidates = core.readTierCandidates("palace-room", PROJECT, { room: "hijack-room", includeUntrusted: true });
       const rawHijack = rawCandidates.find((c) => c.content.includes(HIJACK_TERM));
       assert.ok(rawHijack, "precondition: the hijacked room file must be a discoverable candidate");
       assert.equal(rawHijack.untrusted, true, "precondition: readTierCandidates must tag it untrusted");
@@ -220,6 +225,92 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       const capped = result.renderFenced(1);
       const uncapped = result.renderFenced();
       assert.ok(capped.length < uncapped.length, "a capped render must be strictly shorter than the uncapped render");
+    });
+  });
+
+  // ── PART D — T2 (MEDIUM-1): archive half is sorted date-descending before
+  // truncation, not just the live half ─────────────────────────────────────
+  // Before this fix, `readJournalCandidates`'s rollup-archive half
+  // (retrieval/candidates.ts) and `readLegacyJournalCandidates` (this file)
+  // were built in raw, filesystem-enumeration order and appended AFTER the
+  // already-date-sorted live half — so when `scoreJournalTier`'s
+  // `perTierLimit` truncation cut mid-archive, WHICH archive entries
+  // survived depended on readdirSync order, not recency (the exact
+  // "sort-before-truncate" bug class the live half never had). This test
+  // proves the archive half is now internally sorted date-descending too.
+  describe("PART D — MEDIUM-1: archive-half truncation keeps the newest entries overall, not filesystem enumeration order", () => {
+    const PROJECT = "qmp-archive-sort-demo";
+    const TERM = "ARCHIVE_SORT_TRUNCATION_UNIQUE_TERM";
+
+    it("perTierLimit below the total (1 live + 20 archive) survives as the N NEWEST dates overall", async () => {
+      const jdir = core.journalDir(PROJECT);
+      fs.mkdirSync(jdir, { recursive: true });
+
+      // 1 live entry — the single most recent date in the whole fixture.
+      // The date is embedded IN the matched line (not just the filename) so
+      // each entry's excerpt is textually unique — otherwise queryMemory()'s
+      // own cross-source fusion (fuseCanonical, keyed by normalized excerpt)
+      // would collapse same-text hits into one canonical item regardless of
+      // date, defeating this test's ability to inspect per-date survivors
+      // (see PART C's "renderFenced(limit) caps..." test above for the same
+      // precaution on the same fusion mechanism).
+      fs.writeFileSync(path.join(jdir, "2026-08-30--card--live-newest.md"), `# live\n${TERM} 2026-08-30\n`, "utf-8");
+
+      // 20 archive entries, dates 2026-01-01..2026-01-20, WRITTEN in a
+      // shuffled (non-monotonic) order — deliberately neither ascending nor
+      // descending by date — so raw fs.readdirSync() enumeration (which
+      // tends to reflect creation order, not sorted order, on most
+      // filesystems) does not coincide with date order.
+      const archiveDir = path.join(jdir, "archive");
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const dates = [];
+      for (let i = 1; i <= 20; i++) dates.push(`2026-01-${String(i).padStart(2, "0")}`);
+      const shuffled = [];
+      for (let i = 0; i < dates.length; i += 2) {
+        shuffled.push(dates[dates.length - 1 - i]); // newest-of-remaining-pair first
+        if (i + 1 < dates.length) shuffled.push(dates[i]); // then oldest-of-remaining-pair
+      }
+      for (const date of shuffled) {
+        fs.writeFileSync(path.join(archiveDir, `${date}.md`), `## rollup\n${TERM} ${date}\n`, "utf-8");
+      }
+
+      // Non-vacuity precondition: raw filesystem enumeration order must NOT
+      // already equal date-descending order — otherwise this fixture could
+      // pass regardless of whether the fix is present, which would make the
+      // test vacuous. (Astronomically unlikely to trip for 20 shuffled
+      // distinct-date files on any real filesystem; asserted explicitly so a
+      // false pass is loud, not silent.)
+      const rawOrder = fs.readdirSync(archiveDir).filter((f) => f.endsWith(".md"));
+      const sortedDesc = [...rawOrder].sort((a, b) => b.localeCompare(a));
+      assert.notDeepEqual(
+        rawOrder,
+        sortedDesc,
+        "fixture precondition failed: raw fs enumeration order already equals date-sorted order — this fixture cannot discriminate the fix from its absence; reshuffle",
+      );
+
+      const perTierLimit = 5;
+      const result = await core.queryMemory({
+        query: TERM,
+        project: PROJECT,
+        tiers: ["journal"],
+        journal: { includeRollupArchive: true, perTierLimit },
+      });
+
+      assert.equal(
+        result.candidatesBySource.journal,
+        perTierLimit,
+        `precondition: the journal tier's own pre-fusion count must equal perTierLimit (${perTierLimit}) — truncation must have triggered`,
+      );
+
+      // Expected survivors: the live entry (2026-08-30, newest overall) plus
+      // the 4 newest archive dates (2026-01-20, 19, 18, 17) — NOT whatever
+      // the shuffled on-disk write/enumeration order happened to produce.
+      const survivingDates = result.items.map((i) => i.date).sort((a, b) => b.localeCompare(a));
+      assert.deepEqual(
+        survivingDates,
+        ["2026-08-30", "2026-01-20", "2026-01-19", "2026-01-18", "2026-01-17"],
+        `perTierLimit truncation must keep the ${perTierLimit} NEWEST dates overall, not a filesystem-enumeration-order subset; got ${JSON.stringify(survivingDates)}`,
+      );
     });
   });
 });

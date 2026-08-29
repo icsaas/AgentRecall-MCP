@@ -40,6 +40,20 @@
  * this explicitly, don't assume" — confirmed here: it does NOT ride in for
  * free, a dedicated reader is still needed). Tier stays exactly
  * `"journal" | "palace-room"` for Wave 1, matching the task's literal scope.
+ *
+ * ── W2 INDEPENDENT-REVIEW FIX (2026-08-30): the leaf-utility-vs-pipeline-
+ * stage anti-pattern, moved one level down ──
+ * `readTierCandidates` is exported (this file's header above literally tells
+ * a future surface to call it), but Wave 2's `queryMemory()` pipeline is the
+ * ONLY thing that historically applied a trust filter to its output — a
+ * naive caller of this function directly got raw, unfiltered rescue-tagged
+ * content back, reopening CRITICAL-2. Fixed by making this reader SAFE BY
+ * DEFAULT (`ReadTierCandidatesOpts.includeUntrusted`, default `false`, drops
+ * `untrusted === true` before returning) and promoting the trust predicate
+ * itself (`filterTrusted`, below) to a public, canonical export — the SAME
+ * implementation `queryMemory()`'s own trust-filter stage now delegates to,
+ * not a forked second copy. See retrieval/query-memory.ts's header for how
+ * the pipeline's own stage stays intact around this change.
  */
 
 import * as fs from "node:fs";
@@ -200,6 +214,49 @@ export interface ReadTierCandidatesOpts {
    * room.
    */
   room?: string;
+  /**
+   * Independent review fix (W2, 2026-08-30, reports/2026-08-29-pipe-w2-query-report.md):
+   * `readTierCandidates` is a PUBLIC, exported function — a future surface
+   * author calling it directly (as this file's own header instructs future
+   * Wave 3+ migrations to do) got raw candidates back with `untrusted` as a
+   * mere FIELD, no filtering applied, reopening the exact CRITICAL-2
+   * rescue-quarantine injection gap this whole retrieval-pipeline effort
+   * exists to close — just one function further down than `queryMemory()`.
+   *
+   * Default `false` (the safe, naive-caller default): every candidate whose
+   * `untrusted` flag is exactly `true` is dropped via `filterTrusted` BEFORE
+   * this function returns. A candidate with `untrusted === undefined` is
+   * treated as trusted (kept) — `filterTrusted` only drops `=== true`, never
+   * "anything not explicitly false". A candidate that carries a `sourceTag`
+   * but is NOT untrusted is UNAFFECTED — `sourceTag` is a down-tier/
+   * attribution axis, never a drop axis; dropping those would lose genuine,
+   * merely-attributed content.
+   *
+   * Set `true` only when the caller has its own reason to see untrusted
+   * candidates and will apply its own trust decision afterward — e.g.
+   * `queryMemory()`'s own mandatory TRUST-FILTER pipeline stage (see
+   * retrieval/query-memory.ts), which calls this with `includeUntrusted:
+   * true` and then explicitly re-applies `filterTrusted` itself as a
+   * separate, still-mandatory stage — preserving both "no bypassable
+   * stage" AND this reader's own safe-by-default boundary.
+   */
+  includeUntrusted?: boolean;
+}
+
+/**
+ * Canonical trust-filter: drops every candidate whose `untrusted` flag is
+ * exactly `true`. A candidate with `untrusted === undefined` (never actually
+ * produced by `readTierCandidates`'s own readers today, which always set a
+ * boolean, but defensive for any future non-reader-produced MemoryCandidate)
+ * is treated as trusted and kept — only a literal `true` drops.
+ *
+ * THE single implementation both `readTierCandidates`'s own safe-by-default
+ * filtering AND `queryMemory()`'s mandatory TRUST-FILTER pipeline stage
+ * delegate to (independent review fix, W2, 2026-08-30) — do not fork a
+ * second copy of this predicate.
+ */
+export function filterTrusted(candidates: MemoryCandidate[]): MemoryCandidate[] {
+  return candidates.filter((c) => c.untrusted !== true);
 }
 
 function safeReadFile(p: string): string | null {
@@ -266,12 +323,24 @@ function readJournalCandidates(project: string, opts: ReadTierCandidatesOpts): M
     } catch {
       archiveFiles = []; // missing/unreadable archive dir — treat as empty, never throw
     }
+    // Independent review fix (MEDIUM-1, W2, 2026-08-30): build this half into
+    // its own array and sort it date-descending BEFORE appending to `out` —
+    // same pattern the live half above already gets for free from
+    // `listJournalFiles()`'s own `entries.sort((a,b) => b.date.localeCompare(a.date))`.
+    // Without this, `archiveFiles` is in raw `readdirSync` enumeration order
+    // (filesystem-dependent, not date order), so a downstream consumer that
+    // truncates before fully consuming this half (e.g. query-memory.ts's
+    // `scoreJournalTier` perTierLimit break) would keep an arbitrary
+    // enumeration-order subset instead of the newest archived entries — the
+    // exact "sort-before-truncate" bug class this fix closes for the archive
+    // half, matching what the live half already had.
+    const archiveCandidates: MemoryCandidate[] = [];
     for (const file of archiveFiles) {
       const sourcePath = path.join(archiveDir, file);
       const content = safeReadFile(sourcePath);
       if (content === null) continue;
       const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-      out.push({
+      archiveCandidates.push({
         content,
         tier: "journal",
         project,
@@ -283,6 +352,8 @@ function readJournalCandidates(project: string, opts: ReadTierCandidatesOpts): M
         sourceTag: extractFrontmatterSource(content),
       });
     }
+    archiveCandidates.sort((a, b) => b.date.localeCompare(a.date));
+    out.push(...archiveCandidates);
   }
 
   // ---- opt-in raw-archive half (the previously-unconsolidated 5 scanners) ----
@@ -390,13 +461,20 @@ const TIER_READERS: {
  * Read every candidate for one tier of one project, with identity-trust
  * tagging (`untrusted`) already computed. This is the SOLE function future
  * retrieval surfaces should call instead of touching `journalDirs()`/
- * `listRooms()`/raw `readdirSync` directly (Wave 2+ migration — not yet
- * wired to any caller in this wave).
+ * `listRooms()`/raw `readdirSync` directly (Wave 2+ migration).
+ *
+ * SAFE BY DEFAULT (independent review fix, W2, 2026-08-30): unless
+ * `opts.includeUntrusted` is `true`, every `untrusted === true` candidate is
+ * dropped here, before returning — see `ReadTierCandidatesOpts.includeUntrusted`'s
+ * own doc comment for the full reasoning. A direct caller that never learns
+ * about `untrusted` at all still gets trusted-only content, closing the
+ * public escape hatch around `queryMemory()`'s own trust-filter stage.
  */
 export function readTierCandidates(
   tier: MemoryTier,
   project: string,
   opts: ReadTierCandidatesOpts = {},
 ): MemoryCandidate[] {
-  return TIER_READERS[tier](project, opts);
+  const candidates = TIER_READERS[tier](project, opts);
+  return opts.includeUntrusted ? candidates : filterTrusted(candidates);
 }

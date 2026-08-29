@@ -103,11 +103,18 @@
  *      when total matches exceed `limit`, WHICH matches survive depends on
  *      filesystem enumeration order, not recency. `scoreJournalTier` below
  *      iterates `readTierCandidates`'s already-date-sorted-descending live
- *      half first, so its truncation (when it triggers) keeps the NEWEST
- *      matches rather than an arbitrary raw-readdir-order subset — a
- *      characterized IMPROVEMENT (more predictable, favors recency, matches
- *      the tier's own Ebbinghaus-decay intent), not a silent behavior change;
- *      identical output whenever total matches <= limit (the common case).
+ *      half first — a characterized IMPROVEMENT (more predictable, favors
+ *      recency, matches the tier's own Ebbinghaus-decay intent), not a
+ *      silent behavior change; identical output whenever total matches <=
+ *      limit (the common case). CORRECTION (independent review, W2,
+ *      2026-08-30): this file's initial cut only sorted the live half — the
+ *      rollup-archive half (candidates.ts) and the legacy-journal half
+ *      (`readLegacyJournalCandidates` below) were still built in raw,
+ *      filesystem-enumeration order before being concatenated on, so a
+ *      truncation that spilled into either half would still keep an
+ *      arbitrary subset rather than the newest. Both halves are now ALSO
+ *      sorted date-descending before concatenation — the sort-before-
+ *      truncate class is closed across live AND archive (and legacy).
  *   3. Legacy journal directory (`~/.claude/projects/<entry>/memory/journal/` —
  *      `storage/paths.ts`'s `journalDirs()` legacy-fallback branch): Wave 1's
  *      `readTierCandidates` does NOT cover this (confirmed by reading
@@ -118,9 +125,20 @@
  *      `candidates.ts` to add it there, this file adds a small, self-contained
  *      `readLegacyJournalCandidates()` below that mirrors `journalDirs()`'s own
  *      legacy-root traversal — closing the gap without touching Wave 1's file.
+ *      Also now sorted date-descending before returning (see item 2's
+ *      correction above) — it is a third half of the same journal-tier
+ *      concatenation, not exempt from the same truncation hazard.
+ *
+ * ── SCOPE NOTE (independent review, W2, 2026-08-30) ──
+ * CRITICAL-2 (rescue-quarantine injection) is closed for `smart_recall` this
+ * wave. `palaceSearch()` / `journalSearch()` / `recallInsight()` /
+ * `resurrect()` / `session_start()` remain on their own pre-pipeline paths
+ * and are UNCHANGED — they carry whatever trust-filtering (or lack of it)
+ * they had before this wave, until they are migrated onto `queryMemory()` in
+ * Wave 3/4. Do not read this file's fixes as closing the gap workspace-wide.
  */
 
-import { readTierCandidates, type MemoryCandidate } from "./candidates.js";
+import { readTierCandidates, filterTrusted, type MemoryCandidate } from "./candidates.js";
 import { listRooms, recordAccess, ensurePalaceInitialized } from "../palace/rooms.js";
 import { stem, expandQuery } from "../helpers/normalize.js";
 import { tokenizeWords } from "../helpers/tokenize.js";
@@ -316,12 +334,23 @@ function lineMatchesQuery(line: string, keywords: string[]): boolean {
 // ---------------------------------------------------------------------------
 // TRUST-FILTER stage — mandatory, applied to every candidate before scoring.
 // Not individually callable/skippable: every tier-scoring function below
-// filters `!c.untrusted` as its FIRST step, before any tokenize/score work.
+// filters through `filterTrusted` as its FIRST step, before any
+// tokenize/score work.
+//
+// Independent review fix (W2, 2026-08-30): this stage now delegates to
+// `filterTrusted` (retrieval/candidates.ts) — the SAME canonical
+// implementation `readTierCandidates`'s own safe-by-default filtering uses —
+// rather than a local, forked `!c.untrusted` predicate. Every `readTierCandidates`
+// call site below passes `includeUntrusted: true` so this stage still sees
+// (and still filters) the full candidate set — the reader's own new
+// safe-by-default drop is bypassed here on purpose, because this pipeline
+// stage is the mandatory, non-bypassable place that decision belongs;
+// keeping BOTH the reader's own default-safe boundary AND this stage intact
+// preserves queryMemory()'s exact pre-existing ranking (byte-identical —
+// see this wave's report for the smartRecall() equivalence proof) while
+// closing the direct-caller escape hatch a naive `readTierCandidates()`
+// caller previously had.
 // ---------------------------------------------------------------------------
-
-function trustFilter(candidates: MemoryCandidate[]): MemoryCandidate[] {
-  return candidates.filter((c) => !c.untrusted);
-}
 
 // ---------------------------------------------------------------------------
 // SCOPE stage — Wave 3 seam. Passthrough this wave (no existing smart_recall
@@ -341,6 +370,16 @@ function applyScope<T>(items: T[], _project: string, _scope: string | undefined)
 // throws. Untrusted always false: this content predates the working-memory
 // rescue mechanism's existence entirely (it is a pre-package memory format),
 // so it structurally cannot carry a `source: working-memory-rescue` tag.
+//
+// Independent review fix (MEDIUM-1, W2, 2026-08-30): returns date-descending
+// (sorted below, before returning) — same sort-before-truncate closure this
+// wave applies to candidates.ts's rollup-archive half. Raw traversal order
+// here is nested-readdirSync (project-dir enumeration outer, file-within-dir
+// enumeration inner) — filesystem-dependent, not date order — so a caller
+// truncating this list (scoreJournalTier's perTierLimit break, after
+// concatenating this onto the already-sorted live+rollup-archive half) must
+// not see an arbitrary enumeration-order subset when total legacy entries
+// exceed the limit.
 // ---------------------------------------------------------------------------
 
 function readLegacyJournalCandidates(project: string): MemoryCandidate[] {
@@ -389,6 +428,7 @@ function readLegacyJournalCandidates(project: string): MemoryCandidate[] {
       });
     }
   }
+  out.sort((a, b) => b.date.localeCompare(a.date));
   return out;
 }
 
@@ -405,9 +445,12 @@ function scoreJournalTier(
   query: string,
   opts: { includeRollupArchive?: boolean; perTierLimit?: number; since?: string },
 ): QueryMemoryItem[] {
-  const candidates = trustFilter(
-    readTierCandidates("journal", project, { includeRollupArchive: opts.includeRollupArchive ?? true }),
-  ).concat(trustFilter(readLegacyJournalCandidates(project)));
+  const candidates = filterTrusted(
+    readTierCandidates("journal", project, {
+      includeRollupArchive: opts.includeRollupArchive ?? true,
+      includeUntrusted: true,
+    }),
+  ).concat(filterTrusted(readLegacyJournalCandidates(project)));
 
   const keywords = tokenizeWords(query);
   if (keywords.length === 0) return [];
@@ -474,7 +517,9 @@ function scorePalaceTier(
   // content already exists on disk — `listRooms()` requires a `_room.json`
   // per room dir, which only `ensurePalaceInitialized`/`createRoom` write.
   ensurePalaceInitialized(project);
-  const candidates = trustFilter(readTierCandidates("palace-room", project, { room: opts.room }));
+  const candidates = filterTrusted(
+    readTierCandidates("palace-room", project, { room: opts.room, includeUntrusted: true }),
+  );
   const rooms = listRooms(project);
   const salienceByRoom = new Map(rooms.map((r) => [r.slug, r.salience]));
 
@@ -806,8 +851,8 @@ export function queryArchiveFallback(project: string, query: string, limit: numb
   const keywords = tokenizeWords(query);
   if (keywords.length === 0 || limit <= 0) return [];
 
-  const candidates = trustFilter(
-    readTierCandidates("journal", project, { includeRawArchive: true }).filter(
+  const candidates = filterTrusted(
+    readTierCandidates("journal", project, { includeRawArchive: true, includeUntrusted: true }).filter(
       (c) => c.sourceKind === "journal-archive-raw",
     ),
   );
