@@ -208,11 +208,6 @@ const ALLOWLIST_B = {
     "reads exactly one self-authored file by constructed exact path (`${date}-alignment.md`) — " +
     "never enumerates/globs journalDir's arbitrary `.md` files, so a `--card--` file can never be " +
     "the one read here.",
-  "tools-logic/journal-cold-start.ts::journalColdStart":
-    "(KNOWN GAP, pre-existing, out of this wave's fix scope) reads a `fullPath` journal-ish entry " +
-    "in addition to the top-3-rooms README scan named in ALLOWLIST_C — architecture review " +
-    "2026-08-21 already deferred this surface for Wave 1 ('zero existing call sites changed'); " +
-    "carried forward here unfixed, not silently re-certified, at the finer function-scope grain.",
   "tools-logic/journal-merge.ts::journalMerge":
     "explicit, opt-in, human/agent-directed two-file merge tool — the caller must already know " +
     "and pass both exact filenames; not a generic 'rank/return whatever is in this directory' " +
@@ -373,14 +368,6 @@ const ALLOWLIST_C = {
     "different filesystem location (the scanned project directory, e.g. ~/Projects/whatever/) that " +
     "AgentRecall's own rescue mechanism can never write to (it only ever writes under this store's " +
     "own projects/<slug>/journal|palace).",
-  "tools-logic/check.ts::check":
-    "(KNOWN GAP) the alignment-room scanner globs that room's `.md` files (excluding README.md/" +
-    "_room.json) and returns parsed correction excerpts to the caller — architecture review 2026-08-21 " +
-    "already named this surface; write-side-only-safe today via consolidate.ts's write-time choke.",
-  "tools-logic/journal-cold-start.ts::journalColdStart":
-    "(KNOWN GAP) iterates listRooms() and reads each of the top-3 rooms' README.md into the cold-" +
-    "start bootstrap dump — found while extending this harness for Wave 1; not previously named by " +
-    "the 2026-08-21 architecture review. Write-side-only-safe today via consolidate.ts.",
   "tools-logic/journal-write.ts::journalWrite":
     "(SAFE) its palaceDir() usage is WRITE-only (constructs `rooms/<slug>/<topic>.md` as an append " +
     "target for journal_write's optional palace_room routing) — the file's readFileSync calls target " +
@@ -390,16 +377,18 @@ const ALLOWLIST_C = {
     "(knowledge_write's own topic file) to decide append-vs-skip — a write-path decision, never a " +
     "retrieval surface returning content to a new caller.",
   "tools-logic/palace-lint.ts::palaceLint":
-    "(KNOWN GAP) globs each room's `.md` files (excluding README.md) to lint entry structure and " +
-    "reports issues that echo content fragments — architecture review 2026-08-21 already named this " +
-    "surface; write-side-only-safe today via consolidate.ts.",
+    "(SAFE — structural lint only, no room content in output; re-verified 2026-08-30 while closing " +
+    "the palace-room KNOWN-GAP cluster, correcting a prior reason text that had never been checked " +
+    "against this function's ACTUAL body) its only readFileSync targets `palace-index.json` (JSON " +
+    "metadata, parsed only to stamp `last_lint`), never a room `.md` file — every `fs.readdirSync(roomPath)` " +
+    "over room content is COUNT-only (`files.length` for the 'empty' check) or a byte-level " +
+    "`copyFileSync` during archive `fix`, never a `readFileSync` on room content. Every `LintIssue` " +
+    "field (`description`/`suggestion`) is a template string interpolating `room.name`/`room.slug`/" +
+    "numeric stats (day counts, salience, connection counts) only — no room file content, verbatim or " +
+    "excerpted, ever reaches the returned `PalaceLintResult`.",
   "tools-logic/palace-read.ts::palaceRead":
     "(SAFE) reads a CALLER-SPECIFIED single room+topic (defaulting to README when topic is omitted) — " +
     "an explicit fetch-by-key, never a passive multi-room scan.",
-  "tools-logic/palace-search.ts::palaceSearch":
-    "(KNOWN GAP) globs every room's `.md` files (including README.md) and returns scored excerpts to " +
-    "the caller — architecture review 2026-08-21 already named this surface as the PRIMARY room-" +
-    "content retrieval target for a future queryMemory() migration; write-side-only-safe today.",
   "tools-logic/palace-write.ts::palaceWrite":
     "(SAFE) readFileSync(targetFile) is a read-BEFORE-write check on its OWN write target " +
     "(palace_write's own topic file) to decide append-vs-replace — a write-path decision.",
@@ -1308,5 +1297,137 @@ describe("destination-proof — a hijacked rescue card cannot outrank/impersonat
     const rescueDate = writeRescueTaggedCard(REAL_SLUG, "gap2-hijack-001", "SOLO_VERBATIM_HIJACK");
     const result = core.fetchVerbatim(REAL_SLUG, { kind: "journal", date: rescueDate });
     assert.equal(result, null, `fetchVerbatim({kind:"journal"}) must return null for a rescue-tagged-only date, never fabricate a verbatim source; got ${JSON.stringify(result)}`);
+  });
+
+  // ── Wave 3a destination-proofs (P0 palace-room KNOWN-GAP cluster closure,
+  // 2026-08-30) — palaceSearch/check/journalColdStart routed through
+  // readTierCandidates in this wave. Same fixture shapes as the P0
+  // destination-proofs above.
+
+  it("palaceSearch never surfaces a rescue-tagged room file's content, but still surfaces a genuine sibling", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    // Body (non-heading) lines — palaceSearch deliberately skips lines that
+    // look like markdown headings (`^#{1,6}\s`), so the query term must live
+    // in a real body line for either file to be eligible to match at all.
+    // (writeRescueTaggedRoomFile always wraps its title in a `# heading`,
+    // which palaceSearch would skip regardless of trust — that would make
+    // this destination-proof vacuous, so the rescue file is hand-written
+    // here with the hijack term in its BODY.)
+    const roomDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "decisions");
+    fs.mkdirSync(roomDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(roomDir, "hijacked-search.md"),
+      `---\nsource: working-memory-rescue\n---\n\n# Hijacked\n\n${HIJACK_TERM_2} unique_palace_search_marker\n`,
+      "utf-8",
+    );
+    fs.writeFileSync(path.join(roomDir, "genuine-search.md"), `# Genuine\n\n${GENUINE_TERM} unique_palace_search_marker\n`, "utf-8");
+
+    const result = await core.palaceSearch({ query: "unique_palace_search_marker", project: REAL_SLUG });
+    assert.ok(!result.results.some((r) => r.excerpt.includes(HIJACK_TERM_2)), `palaceSearch must never surface rescue-tagged content; got ${JSON.stringify(result.results)}`);
+    assert.ok(result.results.some((r) => r.excerpt.includes(GENUINE_TERM)), `palaceSearch must still surface the genuine sibling entry; got ${JSON.stringify(result.results)}`);
+  });
+
+  it("palaceSearch returns total_matches=0 gracefully (no crash) when a room's ONLY file is rescue-tagged", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    // Body (non-heading) line, hand-written (not writeRescueTaggedRoomFile,
+    // which always wraps its title in a `# heading` palaceSearch would skip
+    // regardless of trust — that would make this test pass "by accident",
+    // proving nothing about the trust filter). Precondition below proves
+    // the term WOULD match if the trust filter were absent.
+    const roomDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "blockers");
+    fs.mkdirSync(roomDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(roomDir, "only-file.md"),
+      "---\nsource: working-memory-rescue\n---\n\n# Solo\n\nSOLO_RESCUE_ONLY_TERM\n",
+      "utf-8",
+    );
+    // Precondition: the term is genuinely matchable body text, not a heading
+    // — read the raw file directly and confirm it's a body line the
+    // heading-skip would NOT suppress.
+    const raw = fs.readFileSync(path.join(roomDir, "only-file.md"), "utf-8");
+    const bodyLine = raw.split("\n").find((l) => l.includes("SOLO_RESCUE_ONLY_TERM"));
+    assert.ok(bodyLine && !/^#{1,6}\s/.test(bodyLine), "sanity: the fixture's marker must live in a non-heading body line");
+
+    const result = await core.palaceSearch({ query: "SOLO_RESCUE_ONLY_TERM", room: "blockers", project: REAL_SLUG });
+    assert.equal(result.total_matches, 0, `expected zero matches when the only candidate is rescue-tagged; got ${JSON.stringify(result)}`);
+    assert.deepEqual(result.results, []);
+  });
+
+  function writeAlignmentRoomEntry(slug, filename, dateStr, goal, correction, source) {
+    core.ensurePalaceInitialized(slug);
+    const roomDir = path.join(TEST_ROOT, "projects", slug, "palace", "rooms", "alignment");
+    fs.mkdirSync(roomDir, { recursive: true });
+    const frontmatter = source ? `---\nsource: ${source}\n---\n\n` : "";
+    const body = `${frontmatter}### ${dateStr} — high\n**Goal**: ${goal}\n**Human correction**: ${correction}\n**Delta**: ${correction}\n\n`;
+    fs.writeFileSync(path.join(roomDir, filename), body, "utf-8");
+  }
+
+  it("check() never surfaces a rescue-tagged alignment-room correction, but still surfaces a genuine sibling", async () => {
+    const uniqueGoal = "unique_check_goal_marker_for_alignment_room_test";
+    writeAlignmentRoomEntry(REAL_SLUG, "genuine-align.md", "2026-01-01", uniqueGoal, GENUINE_TERM);
+    writeAlignmentRoomEntry(REAL_SLUG, "hijacked-align.md", "2026-01-02", uniqueGoal, HIJACK_TERM_2, "working-memory-rescue");
+
+    const result = await core.check({ goal: uniqueGoal, confidence: "medium", project: REAL_SLUG });
+    assert.ok(!result.similar_past_deltas.some((d) => d.delta.includes(HIJACK_TERM_2)), `check() must never surface a rescue-tagged correction; got ${JSON.stringify(result.similar_past_deltas)}`);
+    assert.ok(result.similar_past_deltas.some((d) => d.delta.includes(GENUINE_TERM)), `check() must still surface the genuine sibling correction; got ${JSON.stringify(result.similar_past_deltas)}`);
+  });
+
+  it("check() gracefully returns empty similar_past_deltas from the room (no crash) when the alignment room's ONLY file is rescue-tagged", async () => {
+    const uniqueGoal = "unique_check_goal_marker_for_empty_alignment_room_test";
+    writeAlignmentRoomEntry(REAL_SLUG, "only-hijacked.md", "2026-02-01", uniqueGoal, "SOLO_HIJACK_DELTA_TERM", "working-memory-rescue");
+    const result = await core.check({ goal: uniqueGoal, confidence: "medium", project: REAL_SLUG });
+    assert.ok(!result.similar_past_deltas.some((d) => d.delta.includes("SOLO_HIJACK_DELTA_TERM")), `check() must never surface a rescue-tagged correction; got ${JSON.stringify(result.similar_past_deltas)}`);
+  });
+
+  it("journalColdStart never surfaces a rescue-tagged room README's entries in top_rooms, but still surfaces a genuine README's entries", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+
+    // Make "knowledge" non-empty (countRoomEntries scans ALL room .md files
+    // for "### " headers) so it outranks the still-empty default rooms and
+    // is guaranteed a top_rooms slot, then rescue-tag its README specifically.
+    const knowledgeDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "knowledge");
+    fs.mkdirSync(knowledgeDir, { recursive: true });
+    fs.writeFileSync(path.join(knowledgeDir, "topic.md"), "### 2026-01-01 — high\nnon-README entry, just to make this room non-empty\n", "utf-8");
+    fs.writeFileSync(path.join(knowledgeDir, "README.md"), `---\nsource: working-memory-rescue\n---\n\n### 2026-01-02 — high\n${HIJACK_TERM_2}\n`, "utf-8");
+
+    // Same treatment for "decisions", but its README is GENUINE — proves the
+    // sibling room's real README entries still surface.
+    const decisionsDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "decisions");
+    fs.mkdirSync(decisionsDir, { recursive: true });
+    fs.writeFileSync(path.join(decisionsDir, "topic.md"), "### 2026-01-01 — high\nnon-README entry, just to make this room non-empty\n", "utf-8");
+    fs.writeFileSync(path.join(decisionsDir, "README.md"), `### 2026-01-02 — high\n${GENUINE_TERM}\n`, "utf-8");
+
+    const result = await core.journalColdStart({ project: REAL_SLUG });
+    const knowledgeRoom = result.palace_context.top_rooms.find((r) => r.slug === "knowledge");
+    const decisionsRoom = result.palace_context.top_rooms.find((r) => r.slug === "decisions");
+    assert.ok(knowledgeRoom, "sanity: knowledge room must appear in top_rooms (made non-empty above)");
+    assert.ok(decisionsRoom, "sanity: decisions room must appear in top_rooms (made non-empty above)");
+    assert.ok(!knowledgeRoom.recent_entries.some((e) => e.includes(HIJACK_TERM_2)), `journalColdStart must never surface a rescue-tagged README's entries; got ${JSON.stringify(knowledgeRoom.recent_entries)}`);
+    assert.equal(knowledgeRoom.recent_entries.length, 0, "with the ONLY README rescue-tagged, recent_entries must be empty (no fallback fabrication)");
+    assert.ok(decisionsRoom.recent_entries.some((e) => e.includes(GENUINE_TERM)), `journalColdStart must still surface a genuine sibling room's README entries; got ${JSON.stringify(decisionsRoom.recent_entries)}`);
+  });
+
+  it("journalColdStart's hot window never surfaces a rescue-tagged journal card's brief, but still surfaces a genuine sibling's brief", async () => {
+    const today = daysAgo(0);
+    writeCardOnDate(REAL_SLUG, "cs-genuine-001", today, GENUINE_TERM, "hook-end");
+    writeCardOnDate(REAL_SLUG, "cs-hijack-001", today, HIJACK_TERM_2, "working-memory-rescue");
+
+    const result = await core.journalColdStart({ project: REAL_SLUG });
+    assert.ok(!result.cache.hot.entries.some((e) => e.brief && e.brief.includes(HIJACK_TERM_2)), `journalColdStart's hot window must never surface a rescue-tagged brief; got ${JSON.stringify(result.cache.hot.entries)}`);
+    assert.ok(result.cache.hot.entries.some((e) => e.brief && e.brief.includes(GENUINE_TERM)), `journalColdStart's hot window must still surface the genuine sibling's brief; got ${JSON.stringify(result.cache.hot.entries)}`);
+    // W3a review fix: the quarantined rescue card must still be COUNTED (existence
+    // preserved, brief null) — so the bucket sum must always equal total_entries.
+    // Pre-fix this diverged (rescue card `continue`d out of hot while total_entries
+    // still counted it): a silently-wrong surfaced count. This is the regression guard.
+    const bucketSum = result.cache.hot.count + result.cache.warm.count + result.cache.cold.count;
+    assert.equal(result.total_entries, bucketSum, `journalColdStart count invariant: total_entries (${result.total_entries}) must equal hot+warm+cold (${bucketSum}) even when a rescue-tagged card falls in the hot window`);
+    assert.ok(result.cache.hot.entries.some((e) => e.brief === null), `the quarantined rescue card must remain present in hot with a null brief (existence preserved), not be dropped; got ${JSON.stringify(result.cache.hot.entries)}`);
+  });
+
+  it("palaceLint never echoes a rescue-tagged room file's raw content into its issues (structural-only, evidence for the SAFE reclassification)", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    writeRescueTaggedRoomFile(REAL_SLUG, "blockers", "hijacked.md", HIJACK_TERM_2);
+    const result = await core.palaceLint({ project: REAL_SLUG });
+    assert.ok(!JSON.stringify(result).includes(HIJACK_TERM_2), `palaceLint must never echo raw room content into its output (it is structural-only, no content read at all); got ${JSON.stringify(result)}`);
   });
 });

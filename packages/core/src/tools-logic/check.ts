@@ -23,8 +23,9 @@ import {
   type WatchForPattern,
 } from "../helpers/alignment-patterns.js";
 import { awarenessUpdate } from "./awareness-update.js";
-import { palaceDir, projectSubPath } from "../storage/paths.js";
+import { projectSubPath } from "../storage/paths.js";
 import { listRooms } from "../palace/rooms.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 import { palaceWrite } from "./palace-write.js";
 import { predictCorrection, type PredictCorrectionResult } from "./predict-correction.js";
 
@@ -211,46 +212,50 @@ export async function check(input: CheckInput): Promise<CheckResult> {
     }
   }
 
-  // 2b. From palace alignment room — rich correction history agents store there
+  // 2b. From palace alignment room — rich correction history agents store there.
+  // Wave 3a (P0 palace-room KNOWN-GAP closure, 2026-08-30): routed through the
+  // shared, trust-safe FETCH stage (readTierCandidates) instead of this
+  // surface's own raw fs.readdirSync+readFileSync glob — a rescue-tagged room
+  // file's parsed "Human correction"/"Delta" excerpt can no longer be echoed
+  // back through similar_past_deltas. README.md/_room.json are excluded here
+  // (as before) since readTierCandidates includes README.md by default and
+  // _room.json is not a `.md` entry parsed by the `### DATE` pattern below.
   try {
-    const pd = palaceDir(slug);
     const rooms = listRooms(slug);
     const alignmentRoom = rooms.find((r) => r.name.toLowerCase() === "alignment" || r.slug === "alignment");
     if (alignmentRoom) {
-      const alignRoomPath = path.join(pd, "rooms", alignmentRoom.slug);
-      if (fs.existsSync(alignRoomPath)) {
-        const files = fs.readdirSync(alignRoomPath).filter((f) => f.endsWith(".md") && f !== "README.md" && f !== "_room.json");
-        for (const file of files) {
-          const content = fs.readFileSync(path.join(alignRoomPath, file), "utf-8");
-          // Parse entries: ### DATE — CONFIDENCE blocks with Goal + Human correction
-          const entryPattern = /###\s+(\d{4}-\d{2}-\d{2})[^\n]*\n([\s\S]*?)(?=###|\s*$)/g;
-          let match: RegExpExecArray | null;
-          while ((match = entryPattern.exec(content)) !== null) {
-            const date = match[1];
-            const block = match[2];
-            const goalMatch = block.match(/\*\*Goal\*\*:\s*(.+)/);
-            const correctionMatch = block.match(/\*\*Human correction\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
-            const deltaMatch = block.match(/\*\*Delta\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
-            if (!goalMatch) continue;
+      const candidates = readTierCandidates("palace-room", slug, { room: alignmentRoom.slug });
+      for (const candidate of candidates) {
+        if (candidate.file === "README.md") continue;
+        const content = candidate.content;
+        // Parse entries: ### DATE — CONFIDENCE blocks with Goal + Human correction
+        const entryPattern = /###\s+(\d{4}-\d{2}-\d{2})[^\n]*\n([\s\S]*?)(?=###|\s*$)/g;
+        let match: RegExpExecArray | null;
+        while ((match = entryPattern.exec(content)) !== null) {
+          const date = match[1];
+          const block = match[2];
+          const goalMatch = block.match(/\*\*Goal\*\*:\s*(.+)/);
+          const correctionMatch = block.match(/\*\*Human correction\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
+          const deltaMatch = block.match(/\*\*Delta\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
+          if (!goalMatch) continue;
 
-            const pastGoal = goalMatch[1].trim();
-            const correction = correctionMatch?.[1].trim() ?? "";
-            const delta = deltaMatch?.[1].trim() ?? correction;
-            if (!delta) continue;
+          const pastGoal = goalMatch[1].trim();
+          const correction = correctionMatch?.[1].trim() ?? "";
+          const delta = deltaMatch?.[1].trim() ?? correction;
+          if (!delta) continue;
 
-            const pastKeywords = extractKeywords(pastGoal, 5);
-            const overlap = goalKeywords.filter((k) => pastKeywords.some((pk) => pk.includes(k) || k.includes(pk)));
-            // Also check if goal keywords appear in the correction text (broader match)
-            const correctionKeywords = extractKeywords(delta, 5);
-            const correctionOverlap = goalKeywords.filter((k) => correctionKeywords.some((ck) => ck.includes(k) || k.includes(ck)));
+          const pastKeywords = extractKeywords(pastGoal, 5);
+          const overlap = goalKeywords.filter((k) => pastKeywords.some((pk) => pk.includes(k) || k.includes(pk)));
+          // Also check if goal keywords appear in the correction text (broader match)
+          const correctionKeywords = extractKeywords(delta, 5);
+          const correctionOverlap = goalKeywords.filter((k) => correctionKeywords.some((ck) => ck.includes(k) || k.includes(ck)));
 
-            if (overlap.length >= 1 || correctionOverlap.length >= 2) {
-              similarDeltas.push({
-                date,
-                goal: pastGoal.slice(0, 80),
-                delta: delta.slice(0, 200),
-              });
-            }
+          if (overlap.length >= 1 || correctionOverlap.length >= 2) {
+            similarDeltas.push({
+              date,
+              goal: pastGoal.slice(0, 80),
+              delta: delta.slice(0, 200),
+            });
           }
         }
       }

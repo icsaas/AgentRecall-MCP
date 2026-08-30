@@ -9,6 +9,7 @@ import { palaceDir } from "../storage/paths.js";
 import { ensurePalaceInitialized, listRooms } from "../palace/rooms.js";
 import { readAwareness, readAwarenessState } from "../palace/awareness.js";
 import { readP0Corrections } from "../storage/corrections.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 import type { SessionState } from "../types.js";
 
 export interface JournalColdStartInput {
@@ -67,11 +68,19 @@ export async function journalColdStart(input: JournalColdStartInput): Promise<Jo
     }
 
     const rooms = listRooms(slug);
+    // Wave 3a (P0 palace-room KNOWN-GAP closure, 2026-08-30): routed through
+    // the shared, trust-safe FETCH stage (readTierCandidates) instead of a
+    // raw fs.existsSync+readFileSync on the room's README.md — a
+    // rescue-tagged README can no longer be dumped verbatim into the
+    // cold-start bootstrap payload. readTierCandidates includes README.md by
+    // default (matching the original scope), so filtering to that one file
+    // reproduces the "top-3 rooms, README focus" selection exactly.
     palaceContext.top_rooms = rooms.slice(0, 3).map(r => {
-      const roomReadmePath = path.join(pd, "rooms", r.slug, "README.md");
+      const roomCandidates = readTierCandidates("palace-room", slug, { room: r.slug });
+      const readmeCandidate = roomCandidates.find(c => c.file === "README.md");
       let recentEntries: string[] = [];
-      if (fs.existsSync(roomReadmePath)) {
-        const rmContent = fs.readFileSync(roomReadmePath, "utf-8");
+      if (readmeCandidate) {
+        const rmContent = readmeCandidate.content;
         // Split on entry headers "### date — importance"
         const parts = rmContent.split(/(?=^### )/m).filter(s => s.trimStart().startsWith("###"));
         // Take last 3, trim to 300 chars each to keep cold-start lean
@@ -113,18 +122,49 @@ export async function journalColdStart(input: JournalColdStartInput): Promise<Jo
   let warmCount = 0;
   let coldCount = 0;
 
+  // Wave 3a (P0 palace-room KNOWN-GAP closure, 2026-08-30): the hot-window
+  // journal content is now sourced from the shared, trust-safe FETCH stage
+  // (readTierCandidates) instead of a raw fs.statSync+readFileSync per
+  // entry — a rescue-tagged journal card falling inside the 1.5-day hot
+  // window can no longer have its brief surfaced into the cold-start dump.
+  // `entries` itself still comes from listJournalFiles (unchanged, used
+  // only for existence/date bucketing, never content), and
+  // readTierCandidates's own live-half reader calls that SAME function
+  // internally with the SAME default (includeArchive=false), so
+  // `sourcePath` keys line up 1:1 with `path.join(entry.dir, entry.file)`.
+  const journalCandidates = readTierCandidates("journal", slug);
+  const journalCandidateByPath = new Map(journalCandidates.map(c => [c.sourcePath, c]));
+
   for (const entry of entries) {
     const ageMs = Date.now() - new Date(entry.date).getTime();
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
 
     if (ageDays <= 1.5) {
-      const state = readState(slug, entry.date);
       const fullPath = path.join(entry.dir, entry.file);
-      const stats = fs.statSync(fullPath);
-      const content = stats.size > 20000
-        ? fs.readFileSync(fullPath, "utf-8").slice(0, 20000) + "\n...(truncated)"
-        : fs.readFileSync(fullPath, "utf-8");
-      hot.push({ date: entry.date, state, brief: extractSection(content, "brief") });
+      const candidate = journalCandidateByPath.get(fullPath);
+      const state = readState(slug, entry.date);
+      // Wave 3a review fix (2026-08-30): a rescue-tagged (trust-filtered) or
+      // otherwise-unreadable hot-window entry still EXISTS — its date is
+      // mtime-derived, not attacker-controlled — so it is counted in `hot`
+      // with a NULL brief (content quarantined, existence preserved), never
+      // dropped. The old `if (!candidate) continue` skipped it from every
+      // bucket while `total_entries` (= entries.length) still counted it, so
+      // hot+warm+cold diverged from total_entries whenever a rescue card fell
+      // in the 1.5-day window — a silently-wrong surfaced count. This mirrors
+      // the journal-list quarantine-not-drop decision; the bucket sum now
+      // always equals total_entries.
+      let brief: string | null = null;
+      if (candidate) {
+        // Threshold uses char-count (`content.length`, UTF-16 code units),
+        // consistent with the char-count slice below — the old code compared
+        // bytes (`stats.size`) but sliced by chars, so a CJK-heavy file could
+        // get a false "...(truncated)" marker while never actually being cut.
+        const content = candidate.content.length > 20000
+          ? candidate.content.slice(0, 20000) + "\n...(truncated)"
+          : candidate.content;
+        brief = extractSection(content, "brief");
+      }
+      hot.push({ date: entry.date, state, brief });
     } else if (ageDays <= 7) {
       warmCount++;
     } else {
