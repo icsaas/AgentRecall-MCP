@@ -1,6 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { sessionStart, sessionStartLite, fenceMemory, type SessionStartResult, type SessionStartLiteResult } from "agent-recall-core";
+import {
+  sessionStart,
+  sessionStartLite,
+  fenceMemory,
+  continuityEntryMarker,
+  continuityHeaderText,
+  type SessionStartResult,
+  type SessionStartLiteResult,
+} from "agent-recall-core";
 
 /** Truncate to nearest word boundary */
 function trunc(s: string, n: number): string {
@@ -48,7 +56,11 @@ export function formatTerse(result: SessionStartResult): string {
   // reads. Absent entirely when the recency index has nothing to show (no
   // noise on a fresh/solo-project store).
   if (result.continuity && result.continuity.length > 0) {
-    lines.push("⏪ Continuity (recent work, other projects included):");
+    // Fable option 2 (label-not-scope, 2026-08-30) — header frames the
+    // WHOLE block as orientation when every entry is cross-project;
+    // otherwise the original neutral header. Single derivation point:
+    // agent-recall-core's continuityHeaderText (never re-implemented here).
+    lines.push(continuityHeaderText(result.continuity_all_cross_project));
     for (const c of result.continuity) {
       const next = c.next_step ? ` → next: ${trunc(c.next_step, 80)}` : "";
       // Identity-trust (2026-08-20): visibly label a rescue-sourced
@@ -56,7 +68,13 @@ export function formatTerse(result: SessionStartResult): string {
       // memory — see SessionStartResult["continuity"]'s `untrusted` field
       // doc comment (agent-recall-core).
       const trustFlag = c.untrusted ? " [unverified — rescued from a crashed session]" : "";
-      lines.push(`  - ${c.ago} [${c.slug}] ${trunc(c.title, 100)}${next}${trustFlag}`);
+      // Fable option 2 (label-not-scope, 2026-08-30) — "↪ " marks an entry
+      // that is NOT this project's own continuity (orientation, recent work
+      // elsewhere); empty for a current-project entry. Derived via the
+      // SAME shared helper the CLI hook-start renderer calls, so the two
+      // text renderers of this field cannot drift.
+      const marker = continuityEntryMarker(c, result.project);
+      lines.push(`  - ${marker}${c.ago} [${c.slug}] ${trunc(c.title, 100)}${next}${trustFlag}`);
     }
     lines.push("");
   }

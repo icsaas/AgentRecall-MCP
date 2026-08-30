@@ -407,7 +407,15 @@ export { fetchVerbatim, type VerbatimKey, type VerbatimSource } from "./tools-lo
 export { buildPriors, type PriorCorrection } from "./tools-logic/prior-builder.js";
 
 // Tool logic — v3.4 composite tools (5-tool surface)
-export { sessionStart, type SessionStartInput, type SessionStartResult, type SlimCorrection } from "./tools-logic/session-start.js";
+export {
+  sessionStart,
+  isCurrentProjectContinuityEntry,
+  continuityEntryMarker,
+  continuityHeaderText,
+  type SessionStartInput,
+  type SessionStartResult,
+  type SlimCorrection,
+} from "./tools-logic/session-start.js";
 export {
   buildRecognition,
   PERSON_LOW_CONFIDENCE_CAVEAT,

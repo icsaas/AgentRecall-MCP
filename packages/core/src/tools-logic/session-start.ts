@@ -53,6 +53,75 @@ function sliceAtWord(text: string, maxLen: number): string {
 }
 
 /**
+ * Fable option 2 (label-not-scope, 2026-08-30, wave/pipe-w4b-continuity-
+ * label) — the SINGLE derivation point for "is this continuity entry from
+ * the project the caller is currently in, or orientation from elsewhere".
+ *
+ * Continuity is deliberately cross-project (F2, continuity wave
+ * 2026-07-31) — this function does not scope/filter anything, it only
+ * answers a labeling question so a caller/renderer can DISTINGUISH "your
+ * own project's continuity" from "recent work elsewhere" instead of
+ * presenting every entry identically. Every cross-project entry keeps
+ * surfacing regardless of what this returns (the shipped cross-project
+ * contract in session-start-continuity.test.mjs is untouched by this
+ * function's existence).
+ *
+ * Used at TWO call sites that must stay in lockstep instead of drifting:
+ *  1. sessionStart()'s own continuity assembly, to COMPUTE the
+ *     `is_current_project` field on each entry at construction time (called
+ *     with an entry that has no `is_current_project` yet, so it always
+ *     falls through to the slug comparison below).
+ *  2. Renderers (MCP formatTerse, CLI hook-start), to READ the label —
+ *     trusting the precomputed field when present, falling back to the
+ *     identical slug comparison for any entry that predates this field
+ *     (e.g. a hand-built SessionStartResult fixture in a renderer's own
+ *     unit test) so three renderers never re-implement three slightly
+ *     different versions of "slug === currentSlug".
+ *
+ * A null/empty/undefined entry slug is treated as NOT the current project
+ * (never crashes on a malformed ledger row, never false-positives a match
+ * between two empty strings) — compares the RESOLVED current slug (the
+ * caller's `slug` after `resolveProject()`), never raw unresolved input.
+ */
+export function isCurrentProjectContinuityEntry(
+  entry: { slug?: string | null; is_current_project?: boolean },
+  currentSlug: string,
+): boolean {
+  if (typeof entry.is_current_project === "boolean") return entry.is_current_project;
+  return Boolean(entry.slug) && entry.slug === currentSlug;
+}
+
+/**
+ * Fable option 2 (label-not-scope, 2026-08-30) — shared per-line label
+ * marker for a continuity entry. Used by every text renderer (MCP
+ * formatTerse, CLI hook-start case) so the "this is NOT this project's own
+ * continuity" marker cannot drift between renderers by being re-implemented
+ * three times. Empty string for a current-project (or legacy/unlabeled)
+ * entry; "↪ " for a cross-project one. Pure formatting — no I/O, no
+ * filtering (the entry still renders either way).
+ */
+export function continuityEntryMarker(
+  entry: { slug?: string | null; is_current_project?: boolean },
+  currentSlug: string,
+): string {
+  return isCurrentProjectContinuityEntry(entry, currentSlug) ? "" : "↪ ";
+}
+
+/**
+ * Fable option 2 (label-not-scope, 2026-08-30) — shared continuity section
+ * header text. Frames the WHOLE block as orientation when every surfaced
+ * entry is cross-project (`continuity_all_cross_project`), otherwise keeps
+ * the original neutral header both renderers already shipped. Single
+ * derivation point so the header string itself cannot drift between the
+ * MCP and CLI renderers.
+ */
+export function continuityHeaderText(allCrossProject: boolean | undefined): string {
+  return allCrossProject
+    ? "⏪ Continuity — orientation only (recent work elsewhere; nothing yet in this project):"
+    : "⏪ Continuity (recent work, other projects included):";
+}
+
+/**
  * Project a full CorrectionRecord to the slim payload shape.
  *
  * KPI counters (retrieved_count, heeded_count, precision, proof_confidence, etc.)
@@ -249,7 +318,35 @@ export interface SessionStartResult {
      * is a shipped, tested acceptance criterion).
      */
     untrusted?: boolean;
+    /**
+     * Fable option 2 (label-not-scope, 2026-08-30, wave/pipe-w4b-continuity-
+     * label) — true when this entry's `slug` is the SAME project the caller
+     * is currently in; false when it is recent work filed under a DIFFERENT
+     * project. Continuity stays deliberately cross-project (see this field's
+     * containing array's own doc comment) — this is presentation/attribution
+     * ONLY, never a filter: every cross-project entry still appears here.
+     * Always populated by sessionStart()'s own continuity assembly (both the
+     * ledger-sourced entries and the working-memory "live" line below), but
+     * optional in the type so an entry built before this field existed (e.g.
+     * a hand-built fixture in a renderer's own unit test) degrades
+     * gracefully — see `isCurrentProjectContinuityEntry`'s doc comment for
+     * the single derivation point renderers should call instead of
+     * re-deriving the slug comparison inline three times.
+     */
+    is_current_project?: boolean;
   }>;
+  /**
+   * Fable option 2 (label-not-scope, 2026-08-30) — true only when EVERY
+   * surfaced `continuity` entry is cross-project (none match the current
+   * project). Lets a renderer frame the WHOLE block as orientation ("recent
+   * — other projects", not "your own continuity") instead of computing that
+   * framing per-entry. Derived ONCE here from the same `is_current_project`
+   * flags set on each entry above — renderers read this field rather than
+   * re-deriving it. Absent (undefined) when `continuity` itself is
+   * absent/empty, matching the established absent-when-empty contract
+   * shared by `predicted_risks` / `mirror_available` / `ab_arm`.
+   */
+  continuity_all_cross_project?: boolean;
   recent: { today: string | null; yesterday: string | null; older_count: number };
   /**
    * Capture-log entries written by `journal_capture` that have NOT yet been
@@ -621,6 +718,11 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
         // pre-existing/legacy entries with no signal at all are correctly
         // treated as trusted.
         untrusted: isRescueSourceTag(s.source) ? true : undefined,
+        // Fable option 2 (label-not-scope, 2026-08-30): label, don't filter —
+        // see isCurrentProjectContinuityEntry's doc comment. Compares
+        // against the RESOLVED `slug` (post resolveProject, in scope from
+        // this function's top), never raw input.
+        is_current_project: isCurrentProjectContinuityEntry({ slug: s.slug }, slug),
       }));
     }
   } catch {
@@ -664,6 +766,10 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
           ago: formatAgo(new Date(newest.mtimeMs).toISOString()),
           slug: liveSlug,
           title: truncateUtf8Bytes(`🔴 live — ${lastLine.prompt}`, SECTION_CHAR_LIMITS.continuity_title),
+          // Fable option 2 (label-not-scope, 2026-08-30) — same labeling as
+          // the ledger-sourced entries above; the "live" line is prepended
+          // to the SAME `continuity` array and must carry the same label.
+          is_current_project: isCurrentProjectContinuityEntry({ slug: liveSlug }, slug),
         };
         continuity = continuity ? [liveEntry, ...continuity] : [liveEntry];
       }
@@ -1177,6 +1283,16 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
       })()
     : undefined;
 
+  // Fable option 2 (label-not-scope, 2026-08-30) — derived ONCE here from
+  // the per-entry `is_current_project` flags set at construction time
+  // above, AFTER budgeting (an entry trimmed by the budget loop must not
+  // count towards this signal). Absent when continuity itself is absent —
+  // matches the absent-when-empty contract used elsewhere in this payload.
+  const continuityAllCrossProject: boolean | undefined =
+    continuityBudgeted && continuityBudgeted.length > 0
+      ? continuityBudgeted.every((c) => !isCurrentProjectContinuityEntry(c, slug))
+      : undefined;
+
   // behavior_rules: apply per-field char limits to when/do.
   const rulesBudgeted = behaviorRules.map((r) => ({
     ...r,
@@ -1191,6 +1307,7 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
     active_rooms: roomsBudgeted,
     cross_project,
     continuity: continuityBudgeted,
+    continuity_all_cross_project: continuityAllCrossProject,
     recent: { today: todayBrief, yesterday: yesterdayBrief, older_count: olderCount },
     recent_captures: capturesBudgeted,
     watch_for,
