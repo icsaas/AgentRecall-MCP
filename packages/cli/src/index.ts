@@ -1062,7 +1062,12 @@ async function main(): Promise<void> {
         // the two renderers of the SAME field. Absent entirely when the
         // recency index has nothing yet (no noise on a fresh/solo-project store).
         if (result.continuity && result.continuity.length > 0) {
-          lines.push("⏪ Continuity (recent work, other projects included):");
+          // Fable option 2 (label-not-scope, 2026-08-30) — header frames the
+          // WHOLE block as orientation when every entry is cross-project;
+          // otherwise the original neutral header. Single derivation point:
+          // agent-recall-core's continuityHeaderText (matches the MCP
+          // formatTerse renderer of this SAME field byte-for-byte).
+          lines.push(core.continuityHeaderText(result.continuity_all_cross_project));
           for (const c of result.continuity.slice(0, 3)) {
             const next = c.next_step ? ` → next: ${truncWordBoundary(c.next_step, 80)}` : "";
             // Identity-trust (2026-08-20): visibly label a rescue-sourced
@@ -1070,7 +1075,12 @@ async function main(): Promise<void> {
             // verified memory — see SessionStartResult["continuity"]'s
             // `untrusted` field doc comment.
             const trustFlag = c.untrusted ? " [unverified — rescued from a crashed session]" : "";
-            lines.push(`   - ${c.ago} [${c.slug}] ${truncWordBoundary(c.title, 100)}${next}${trustFlag}`);
+            // Fable option 2 (label-not-scope, 2026-08-30) — "↪ " marks an
+            // entry that is NOT this project's own continuity (orientation,
+            // recent work elsewhere); empty for a current-project entry.
+            // Same shared helper the MCP formatTerse renderer calls.
+            const marker = core.continuityEntryMarker(c, result.project);
+            lines.push(`   - ${marker}${c.ago} [${c.slug}] ${truncWordBoundary(c.title, 100)}${next}${trustFlag}`);
           }
         }
 
