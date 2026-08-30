@@ -143,18 +143,30 @@
  *
  * ── SCOPE NOTE (independent review, W2, 2026-08-30) ──
  * CRITICAL-2 (rescue-quarantine injection) is closed for `smart_recall` this
- * wave. `palaceSearch()` / `journalSearch()` / `recallInsight()` /
- * `resurrect()` / `session_start()` remain on their own pre-pipeline paths
- * and are UNCHANGED — they carry whatever trust-filtering (or lack of it)
- * they had before this wave, until they are migrated onto `queryMemory()` in
- * Wave 3/4. Do not read this file's fixes as closing the gap workspace-wide.
+ * wave. `palaceSearch()` / `resurrect()` / `session_start()` remain on their
+ * own pre-pipeline paths and are UNCHANGED — they carry whatever
+ * trust-filtering (or lack of it) they had before this wave. Do not read
+ * this file's fixes as closing the gap workspace-wide.
+ *
+ * ── WAVE 3b UPDATE (2026-08-30, reports/2026-08-30-pipe-w3b-migrate-report.md) ──
+ * `journalSearch()` and `recallInsight()` are now migrated onto this
+ * pipeline (journalSearch's primary journal scan via `queryMemory({tiers:
+ * ["journal"]})`; recallInsight() shares this file's `applyScope` — see
+ * `./scope.ts` — directly on its own `recallInsights()` call, without
+ * routing through `queryMemory()` itself, to avoid corrupting its external
+ * contract's `relevance`/`applies_when`/`confirmed`/`file` fields, which
+ * `QueryMemoryItem` does not carry). `palaceSearch()` / `resurrect()` /
+ * `session_start()` remain unmigrated — see the Wave 3b report's resurrect
+ * assessment for why `resurrect()` in particular is a RECOMMENDATION, not a
+ * migration, this wave.
  */
 
 import { readTierCandidates, filterTrusted, type MemoryCandidate } from "./candidates.js";
+import { applyScope } from "./scope.js";
 import { listRooms, recordAccess, ensurePalaceInitialized } from "../palace/rooms.js";
 import { stem, expandQuery } from "../helpers/normalize.js";
 import { tokenizeWords } from "../helpers/tokenize.js";
-import { recallInsight } from "../tools-logic/recall-insight.js";
+import { recallInsights } from "../palace/insights-index.js";
 import { parseSinceDate } from "../tools-logic/journal-search.js";
 import { CONFIDENCE_FLOOR } from "../tools-logic/confidence.js";
 import { scrubForCloud, fenceMemory } from "../storage/content-guard.js";
@@ -204,6 +216,26 @@ export interface QueryMemoryItem {
    *  carried it (`keyword_score` on `PalaceSearchResult`) — forward-compat,
    *  currently unused by any consumer post-migration but not worth dropping. */
   keywordScore?: number;
+  /** Journal-only (Wave 3b, 2026-08-30): 1-indexed line number within the
+   *  matched candidate's content — needed by `journalSearch()`'s migrated
+   *  adapter to reconstruct its external `{date,section,excerpt,line}`
+   *  contract exactly. Not set by any other tier's scorer. */
+  line?: number;
+  /**
+   * SCOPE stage attribution (Wave 3b, `retrieval/scope.ts`'s `applyScope`) —
+   * which project(s) this candidate is attributable to, when the tier has a
+   * genuine cross-project notion of that. Insight-tier items copy this
+   * straight from `IndexedInsight.projects` (`palace/insights-index.ts`).
+   * DELIBERATELY left unset for journal/palace-room items: those tiers are
+   * inherently per-slug (`readTierCandidates(tier, project, ...)` only ever
+   * reads `project`'s own tree), so there is no cross-project attribution to
+   * carry — see `scope.ts`'s own doc comment and this file's
+   * `SCOPE_ATTRIBUTED_TIERS` for why those tiers must never be run through
+   * `applyScope` at all, rather than relying on an absent `projects` field
+   * to mean "no-op" (it does not; it means "unattributed", which is a
+   * different, tier-inappropriate signal for those two tiers).
+   */
+  projects?: string[];
 }
 
 export interface QueryMemoryInput {
@@ -212,9 +244,11 @@ export interface QueryMemoryInput {
    *  resolveProject(), matching Wave 1's `readTierCandidates` convention. */
   project: string;
   tiers: QueryMemoryTier[];
-  /** SCOPE stage seam (Wave 3 wires the real project-vs-global decision).
-   *  Accepted and threaded through so call sites don't need to change again
-   *  next wave, but `applyScope()` below is a passthrough this wave. */
+  /** SCOPE stage (Wave 3b, `./scope.ts`'s `applyScope`) — a real per-
+   *  candidate project-attribution filter for tiers that carry one
+   *  (currently: `insight` only — see `SCOPE_ATTRIBUTED_TIERS` below).
+   *  `undefined`/`"all"` preserves every pre-Wave-3b caller's behavior
+   *  exactly (no filtering). */
   scope?: string;
   /** Final result cap, applied AFTER fusion (matches smart-recall.ts's
    *  `finalResults = results.slice(0, limit)` semantics, but the fused list
@@ -367,14 +401,25 @@ function lineMatchesQuery(line: string, keywords: string[]): boolean {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// SCOPE stage — Wave 3 seam. Passthrough this wave (no existing smart_recall
-// call site enforces project-vs-global scoping today either, so this is not a
-// behavior change — see kickoff plan Wave 3/P7).
-// ---------------------------------------------------------------------------
-
-function applyScope<T>(items: T[], _project: string, _scope: string | undefined): T[] {
-  return items;
-}
+// SCOPE stage — REAL as of Wave 3b (2026-08-30, reports/2026-08-30-pipe-w3b-
+// migrate-report.md). `applyScope` itself now lives in ./scope.ts (see that
+// file's header for why — recall-insight.ts shares it, and it must not
+// create an import cycle with this file). What lives HERE is the tier-level
+// decision of WHICH tiers get run through it at all.
+//
+// SCOPE_ATTRIBUTED_TIERS: only these tiers' items carry a genuine, populated
+// `projects` attribution — every OTHER tier is short-circuited (scope never
+// applied), NOT because `applyScope` would silently no-op for them (it would
+// NOT — an absent `projects` field reads as "unattributed" and would be
+// wrongly EXCLUDED under scope:"project"), but because journal/palace-room
+// candidates are inherently per-slug (`readTierCandidates(tier, project,
+// ...)` only ever reads `project`'s own tree) and therefore have nothing
+// cross-project to filter — see scope.ts's own doc comment for the full
+// reasoning. A future genuinely cross-project journal-like tier (the W3
+// plan's recency-ledger / working-memory-live / session-card rows) joins
+// this set WHEN its scorer is built to populate `projects`/an equivalent
+// attribution field on its QueryMemoryItems — not before.
+const SCOPE_ATTRIBUTED_TIERS = new Set<QueryMemoryTier>(["insight"]);
 
 // ---------------------------------------------------------------------------
 // CHALLENGE (c)-3: legacy journal directory. Wave 1's readTierCandidates does
@@ -471,7 +516,7 @@ function scoreJournalTier(
   const sinceCutoff = opts.since ? parseSinceDate(opts.since) : null;
   const limit = opts.perTierLimit ?? 25;
 
-  interface Hit { title: string; excerpt: string; date: string }
+  interface Hit { title: string; excerpt: string; date: string; line: number }
   const hits: Hit[] = [];
 
   for (const candidate of candidates) {
@@ -496,17 +541,33 @@ function scoreJournalTier(
       let excerpt = line.slice(start, end).trim();
       if (start > 0) excerpt = "..." + excerpt;
       if (end < line.length) excerpt = excerpt + "...";
-      hits.push({ title: `${date} / ${currentSection}`, excerpt, date });
+      hits.push({ title: `${date} / ${currentSection}`, excerpt, date, line: i + 1 });
     }
   }
 
   const items: QueryMemoryItem[] = hits.map((h) => {
-    const id = stableId("journal", h.title);
+    // Independent review fix (W3b, 2026-08-30): `id` must be unique PER HIT,
+    // not per (date,section) — `applyRRF` (below) groups same-tier items by
+    // `item.id` in its own accumulation Map, and on a collision it keeps
+    // ONLY the first-encountered item, silently discarding every subsequent
+    // hit's own excerpt/line (its score contribution is merged in, but the
+    // item itself vanishes). `h.title` alone (`"${date} / ${section}"`) is
+    // NOT unique per hit — TWO DIFFERENT matching lines in the SAME file's
+    // SAME section (a very common real case: a verbose journal entry
+    // mentioning a term twice) previously collapsed into ONE result, a
+    // silent, untested data-loss regression newly exposed on journalSearch's
+    // DEFAULT path by this wave's migration (journalSearch's PRE-migration
+    // implementation had no id/RRF grouping at all — every line match was
+    // pushed independently). Incorporating `line` + `excerpt` makes the id
+    // genuinely unique per hit; `fusionIdentity` (the CROSS-tier/cross-hit
+    // dedup stage, unaffected by this change) still correctly collapses
+    // hits whose excerpt content is a genuine duplicate.
+    const id = stableId("journal", `${h.title}::${h.line}::${h.excerpt}`);
     const days = daysSince(h.date);
     const recency = ebbinghaus(days, EBBINGHAUS_S.journal);
     const exactness = keywordExactness(query, h.excerpt);
     const internalScore = recency * 0.5 + exactness * 0.5;
-    return { id, source: "journal", title: h.title, excerpt: h.excerpt, score: internalScore, date: h.date };
+    return { id, source: "journal", title: h.title, excerpt: h.excerpt, score: internalScore, date: h.date, line: h.line };
   });
   items.sort((a, b) => b.score - a.score);
   return items;
@@ -654,6 +715,29 @@ function scorePalaceTier(
   // a characterized simplification, not a regression — see this file's header.)
   const items: QueryMemoryItem[] = hits.map((h) => {
     const title = `${h.room}/${h.file}`;
+    // NOTE (W3b, 2026-08-30 — deliberately NOT fixed this wave, see the
+    // report's resurrect/harness-scope section): `title` alone
+    // (`${room}/${file}`) is not unique per hit, and shares the EXACT SAME
+    // applyRRF-collision class scoreJournalTier's own fix just above closes
+    // (see that comment for the mechanism) — two distinct matching lines in
+    // the SAME room file collide in applyRRF's per-tier id-Map today,
+    // silently discarding one's excerpt while accumulating both hits' RRF
+    // contribution into whichever one survives. Unlike the journal case,
+    // this defect is PRE-EXISTING (live in smart_recall's palace tier since
+    // Wave 2) and OUT OF W3b's scope (journalSearch/recallInsight only) —
+    // and, verified while investigating this wave's own journal fix, giving
+    // palace items the same per-hit-unique id REMOVES an (accidental,
+    // never-intended) score-inflation side effect of this same bug that
+    // helpers/associative-link.ts's `linkToSimilar` — an entirely different
+    // subsystem this wave does not touch — happens to depend on for its
+    // hardcoded `score > 0.03` similarity threshold
+    // (associative-link.test.mjs's "linkToSimilar creates bidirectional
+    // edges..." fails if this is fixed in isolation, because each hit's own
+    // un-inflated RRF contribution, ~0.016, is genuinely below that
+    // threshold). Fixing this properly needs a decision about
+    // linkToSimilar's OWN threshold calibration, not a query-memory.ts-only
+    // change — flagged in the Wave 3b report for the orchestrator, not
+    // silently fixed or silently left undocumented.
     const id = stableId("palace", title);
     const salience = Math.max(0.4, salienceByRoom.get(h.room) ?? 0.5);
     const internalScore = h.keywordScore * 0.65 + salience * 0.35;
@@ -674,25 +758,52 @@ function scorePalaceTier(
   return items.slice(0, limit);
 }
 
-/** Insight tier: delegates to recallInsight() (its own single-owner tier,
- *  per the architecture review §4.1 — insights are a curated
- *  confirmed-pattern store, not raw retrievable file content, so there is no
- *  MemoryCandidate/trust-tag notion for this tier; every insight item is
- *  `untrusted: false` by construction, a deliberate, documented decision —
- *  not an oversight). Scoring formula ported verbatim from smart-recall.ts. */
-async function scoreInsightTier(
+/**
+ * Insight tier: fetches directly from `recallInsights()`
+ * (`palace/insights-index.ts`, its own single-owner tier per the
+ * architecture review §4.1 — insights are a curated confirmed-pattern
+ * store, not raw retrievable file content, so there is no
+ * MemoryCandidate/trust-tag notion for this tier; every insight item is
+ * `untrusted: false` by construction, a deliberate, documented decision —
+ * not an oversight). Scoring formula ported verbatim from smart-recall.ts.
+ *
+ * Wave 3b (2026-08-30) change: previously fetched via the tools-logic
+ * `recallInsight()` wrapper, which (a) never threaded `project` through to
+ * `recallInsights()`'s own project-correlation boost — the SAME missing-
+ * project-boost gap this wave's report names for `recallInsight()` itself,
+ * fixed here too since it is the same root cause (`recallInsights()` never
+ * receiving a `currentProject` argument), not two separate bugs — and (b)
+ * stripped `IndexedInsight.projects` from its returned shape entirely,
+ * making the SCOPE stage impossible to wire for this tier (there would be
+ * nothing to filter by). Calling `recallInsights()` directly here also
+ * removes this file's former dependency on tools-logic/recall-insight.ts —
+ * recall-insight.ts now depends the OTHER direction (on `./scope.ts`, which
+ * this file also uses), avoiding a circular import that routing THROUGH
+ * `recallInsight()` in both directions would have created.
+ *
+ * CHARACTERIZED, non-substantive precision note: `recallInsight()`'s own
+ * output rounds `relevance` to 2 decimal places before this tier used to
+ * re-normalize it (`i.relevance / maxRelevance`). Reading `recallInsights()`
+ * directly uses the UNROUNDED relevance number instead — a strictly more
+ * precise input to the same ratio, not a behavior change any caller could
+ * observe (`internalScore` differences are sub-0.005, far below anything
+ * that could flip an RRF rank order in practice, and no test in this
+ * package asserts on this tier's exact internal `score` value).
+ */
+function scoreInsightTier(
+  project: string,
   query: string,
   opts: { perTierLimit?: number },
-): Promise<QueryMemoryItem[]> {
+): QueryMemoryItem[] {
   const limit = opts.perTierLimit ?? 20;
-  const insightResults = await recallInsight({ context: query, limit, include_awareness: false });
-  const maxRelevance = Math.max(1, ...insightResults.matching_insights.map((i) => i.relevance));
+  const rawInsights = recallInsights(query, limit, project);
+  const maxRelevance = Math.max(1, ...rawInsights.map((i) => i.relevance));
 
-  const items: QueryMemoryItem[] = insightResults.matching_insights.map((i) => {
+  const items: QueryMemoryItem[] = rawInsights.map((i) => {
     const id = stableId("insight", i.title);
     const relevance = i.relevance / maxRelevance;
     const exactness = keywordExactness(query, i.title);
-    const confirmation = Math.min(1.0, Math.log2(i.confirmed + 1) / 3);
+    const confirmation = Math.min(1.0, Math.log2(i.confirmed_count + 1) / 3);
     const internalScore = relevance * 0.40 + exactness * 0.35 + confirmation * 0.25;
     const rawExcerpt = `[${i.severity}] ${i.applies_when.join(", ")}`;
     const fusionSeed = `${i.title} ${rawExcerpt}`;
@@ -704,6 +815,7 @@ async function scoreInsightTier(
       fusionKey: fusionSeed.length > 300 ? fusionSeed.slice(0, 300) + "..." : fusionSeed,
       score: internalScore,
       severity: i.severity,
+      projects: i.projects,
     };
   });
   items.sort((a, b) => b.score - a.score);
@@ -783,7 +895,7 @@ const TIER_SCORERS: {
       perTierLimit: input.palace?.perTierLimit ?? (input.limit ?? 10) * 2,
     }),
   insight: async (input) =>
-    scoreInsightTier(input.query, {
+    scoreInsightTier(input.project, input.query, {
       // Matches smart-recall.ts's original `recallInsight({..., limit: limit*2})`.
       perTierLimit: input.insight?.perTierLimit ?? (input.limit ?? 10) * 2,
     }),
@@ -798,8 +910,14 @@ export async function queryMemory(input: QueryMemoryInput): Promise<QueryMemoryR
     try {
       // FETCH + TRUST-FILTER + TOKENIZE+SCORE (per-tier strategy table above).
       let items = await TIER_SCORERS[tier](input);
-      // SCOPE stage seam (Wave 3) — passthrough this wave.
-      items = applyScope(items, input.project, input.scope);
+      // SCOPE stage (Wave 3b) — real per-candidate project-attribution
+      // filter, but only for tiers whose items carry genuine cross-project
+      // attribution (see SCOPE_ATTRIBUTED_TIERS above for why journal/
+      // palace-room must short-circuit instead of relying on applyScope's
+      // own undefined-`projects` handling).
+      if (SCOPE_ATTRIBUTED_TIERS.has(tier)) {
+        items = applyScope(items, input.project, input.scope);
+      }
       byTier[tier] = items;
       candidatesBySource[tier] = items.length;
       sourcesQueried.push(tier);

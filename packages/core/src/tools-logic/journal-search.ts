@@ -1,11 +1,8 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { resolveProject } from "../storage/project.js";
-import { journalDirs } from "../storage/paths.js";
 import { ensurePalaceInitialized } from "../palace/rooms.js";
 import { tokenizeWords } from "../helpers/tokenize.js";
-import { isRescueSourcedContent } from "../helpers/journal-filter.js";
 import { readTierCandidates } from "../retrieval/candidates.js";
+import { queryMemory } from "../retrieval/query-memory.js";
 
 export interface JournalSearchInput {
   query: string;
@@ -17,6 +14,15 @@ export interface JournalSearchInput {
    *  Accepts ISO date string ("2026-05-01") or relative duration ("7d", "30d").
    *  Palace and insight results are unaffected. */
   since?: string;
+  /** SCOPE stage (Wave 3b, retrieval/scope.ts) — threaded through to
+   *  queryMemory() for forward-compat with future consumers of this seam.
+   *  Currently a NO-OP for the journal tier: readTierCandidates("journal",
+   *  project, ...) only ever reads `project`'s own tree, so every journal
+   *  candidate is trivially "of project" — there is nothing cross-project
+   *  to filter (see query-memory.ts's `SCOPE_ATTRIBUTED_TIERS`). Kept as an
+   *  accepted parameter so a future genuinely cross-project journal-like
+   *  tier does not require another signature change here. */
+  scope?: string;
 }
 
 /**
@@ -71,80 +77,80 @@ function firstMatchIndex(line: string, keywords: string[]): number {
 
 export async function journalSearch(input: JournalSearchInput): Promise<JournalSearchResult> {
   const slug = await resolveProject(input.project);
-  // Include archive so recall reaches rollup-archived entries (P0-2).
-  // F4 (2026-07-31): journalDirs(slug, true) no longer descends into
-  // journal/archive/raw/ (the unstructured hook-archive verbatim tier) — see
-  // journalDirs' doc comment in storage/paths.ts. That noisy, collision-prone
-  // path is replaced by smartRecall's explicit, confidence-gated "archive"
-  // source (tools-logic/smart-recall.ts). journalSearch here only ever sees
-  // curated journal entries + rollup summaries.
-  const dirs = journalDirs(slug, true);
-  const keywords = queryKeywords(input.query);
+  const keywords = queryKeywords(input.query); // still needed below for the include_palace branch's own local scan
   const limit = input.limit ?? 25;
-  const sinceCutoff = input.since ? parseSinceDate(input.since) : null;
 
-  const results: JournalSearchResult["results"] = [];
+  // Primary journal scan — migrated onto the shared pipeline (Wave 3b,
+  // 2026-08-30, reports/2026-08-30-pipe-w3b-migrate-report.md STEP 1):
+  // fetch + trust-filter + per-line scoring now all come from queryMemory()'s
+  // journal tier (identical excerpt-window/tokenization logic, ported
+  // verbatim into scoreJournalTier — see query-memory.ts) instead of this
+  // function's own fs scan plus an inline call to the rescue-tag choke
+  // predicate (helpers/journal-filter.ts).
+  //
+  // perTierLimit is requested effectively UNBOUNDED
+  // (Number.MAX_SAFE_INTEGER) rather than this function's own `limit`,
+  // because queryMemory()'s journal-tier scorer has no `section` concept —
+  // the section filter below must see every match in the corpus before
+  // truncating, not just the first `limit` unfiltered ones (requesting a
+  // pipeline-level cap here would silently under-fill a section-scoped
+  // result set that has plenty of matches beyond that cap). This mirrors
+  // the ORIGINAL implementation's own shape: it scanned every file/line in
+  // the corpus unconditionally too, refusing only to keep PUSHING past
+  // `limit` — see this function's own equivalence notes in the Wave 3b
+  // report for the one case where truncation ORDER now differs
+  // (characterized, not silent — see below).
+  const queryResult = await queryMemory({
+    query: input.query,
+    project: slug,
+    tiers: ["journal"],
+    scope: input.scope,
+    since: input.since,
+    journal: { includeRollupArchive: true, perTierLimit: Number.MAX_SAFE_INTEGER },
+  });
 
-  for (const dir of dirs) {
-    if (!fs.existsSync(dir)) continue;
-    const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+  let results: JournalSearchResult["results"] = queryResult.items.map((it) => {
+    const date = it.date ?? "";
+    // `it.title` is always exactly "${date} / ${section}" — scoreJournalTier's
+    // own construction (query-memory.ts). Strip the fixed "${date} / "
+    // prefix to recover the raw section value, rather than adding a
+    // redundant field to the shared QueryMemoryItem shape only this one
+    // surface would consume.
+    const section = it.title.slice(date.length + 3);
+    return { date, section, excerpt: it.excerpt, line: it.line ?? 0 };
+  });
 
-    for (const file of files) {
-      // since-filter: skip files whose date is before the cutoff
-      if (sinceCutoff) {
-        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-        if (dateMatch) {
-          const fileDate = new Date(dateMatch[1]);
-          if (fileDate < sinceCutoff) continue;
-        }
-      }
-      const filePath = path.join(dir, file);
-      const content = fs.readFileSync(filePath, "utf-8");
-      // Identity-trust (CRITICAL-1 followup, 2026-08-20): quarantine a
-      // working-memory-rescue card at the shared choke point
-      // (journal-filter.ts's isRescueSourcedContent) — this is the surface
-      // an MCP-connected agent actually calls for "recall/search/find
-      // previous context" (directly via `ar search`, and indirectly as
-      // smart_recall's journal source, see smart-recall.ts), and the exact
-      // one the red-team CRITICAL-2 exploit found returning a hijacked
-      // card's content verbatim, unmarked, with no way for the caller to
-      // even represent an "untrusted" signal on this result shape.
-      if (isRescueSourcedContent(content)) continue;
-      const lines = content.split("\n");
-      let currentSection = "top";
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        if (line.startsWith("## ")) {
-          currentSection = line.slice(3).trim().toLowerCase().replace(/\s+/g, "_");
-        }
-        if (input.section && currentSection !== input.section.toLowerCase()) continue;
-        if (lineMatchesQuery(line, keywords)) {
-          if (results.length >= limit) break;
-          const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-          const date = dateMatch ? dateMatch[1] : file;
-          const matchIdx = firstMatchIndex(line, keywords);
-          const start = Math.max(0, matchIdx - 100);
-          const end = Math.min(line.length, matchIdx + 150);
-          let excerpt = line.slice(start, end).trim();
-          if (start > 0) excerpt = "..." + excerpt;
-          if (end < line.length) excerpt = excerpt + "...";
-          results.push({ date, section: currentSection, excerpt, line: i + 1 });
-        }
-      }
-    }
+  if (input.section) {
+    const wanted = input.section.toLowerCase();
+    results = results.filter((r) => r.section === wanted);
   }
+
+  // Sort-before-truncate (matches the characterized recency-favoring
+  // improvement already documented for the smart_recall migration,
+  // query-memory.ts's CHALLENGE (c)-2): when total matches are within
+  // `limit` this reproduces the ORIGINAL's own final sort byte-for-byte
+  // (same matches, same order); when matches exceed `limit`, this keeps
+  // the truly newest `limit` — not an arbitrary filesystem-enumeration-order
+  // subset (the ORIGINAL's actual truncation behavior — its `limit` cutoff
+  // fired DURING an unsorted raw-readdir traversal, before its own final
+  // date-sort ever ran). See the Wave 3b report for the full equivalence
+  // scoping. This is an intermediate sort — the join with include_palace
+  // results below is re-sorted once more, at the very end, matching the
+  // ORIGINAL's single final sort over the combined set.
+  results.sort((a, b) => b.date.localeCompare(a.date));
+  results = results.slice(0, limit);
 
   if (input.include_palace) {
     try {
       ensurePalaceInitialized(slug);
       // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
       // gap #4): was a raw fs.readdirSync+readFileSync glob over every room's
-      // `.md` files with ZERO rescue-tag check — unlike this function's own
-      // journal loop just above (which has called isRescueSourcedContent
-      // since the 2026-08-20 CRITICAL-1 followup), this branch had never been
-      // fixed. Routed through readTierCandidates("palace-room", ...) — already
-      // trust-tagged + safe-by-default.
+      // `.md` files with ZERO rescue-tag check. Routed through
+      // readTierCandidates("palace-room", ...) — already trust-tagged +
+      // safe-by-default (the SAME canonical trust-filter the primary journal
+      // scan above now inherits via queryMemory()'s journal tier — Wave 3b,
+      // 2026-08-30 — rather than each branch calling the choke predicate on
+      // its own).
       const candidates = readTierCandidates("palace-room", slug);
       for (const c of candidates) {
         const lines = c.content.split("\n");
