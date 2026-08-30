@@ -77,6 +77,13 @@ export function applyScope<T extends { projects?: string[] }>(
 ): T[] {
   if (!scope || scope === "all") return items;
   if (scope === "project") {
+    // No project to scope to (unresolved/empty slug) — fail OPEN, same
+    // principle as the unknown-scope branch below: never surprise-drop
+    // everything. Without this, `includes("")` matches nothing and a
+    // caller that passed scope:"project" but forgot `project` silently gets
+    // zero results (W3b independent review, LOW). W4/session_start consumes
+    // this seam, so the footgun must not ship.
+    if (!project) return items;
     return items.filter((it) => (it.projects?.length ?? 0) > 0 && it.projects!.includes(project));
   }
   if (scope === "global") {

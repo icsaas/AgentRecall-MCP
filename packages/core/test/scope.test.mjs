@@ -43,6 +43,11 @@ describe("retrieval/scope.ts — applyScope()", () => {
     assert.deepEqual(applyScope(items, "proj-a", "not-a-real-scope-value").map((i) => i.id), ["a", "b", "ab", "global-undefined", "global-empty"]);
   });
 
+  it("scope:'project' with an empty/unresolved project fails OPEN, never silently returns nothing (W3b review LOW; W4 consumes this seam)", () => {
+    // Without the guard, includes("") matches no item and the caller gets [].
+    assert.deepEqual(applyScope(items, "", "project").map((i) => i.id), ["a", "b", "ab", "global-undefined", "global-empty"]);
+  });
+
   it("an empty items array never throws for any scope value", () => {
     for (const scope of [undefined, "all", "project", "global", "bogus"]) {
       assert.deepEqual(applyScope([], "proj-a", scope), []);
