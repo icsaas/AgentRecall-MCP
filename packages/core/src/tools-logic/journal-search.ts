@@ -1,10 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveProject } from "../storage/project.js";
-import { journalDirs, palaceDir } from "../storage/paths.js";
-import { ensurePalaceInitialized, listRooms } from "../palace/rooms.js";
+import { journalDirs } from "../storage/paths.js";
+import { ensurePalaceInitialized } from "../palace/rooms.js";
 import { tokenizeWords } from "../helpers/tokenize.js";
 import { isRescueSourcedContent } from "../helpers/journal-filter.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 
 export interface JournalSearchInput {
   query: string;
@@ -137,29 +138,26 @@ export async function journalSearch(input: JournalSearchInput): Promise<JournalS
   if (input.include_palace) {
     try {
       ensurePalaceInitialized(slug);
-      const pd = palaceDir(slug);
-      const rooms = listRooms(slug);
+      // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
+      // gap #4): was a raw fs.readdirSync+readFileSync glob over every room's
+      // `.md` files with ZERO rescue-tag check — unlike this function's own
+      // journal loop just above (which has called isRescueSourcedContent
+      // since the 2026-08-20 CRITICAL-1 followup), this branch had never been
+      // fixed. Routed through readTierCandidates("palace-room", ...) — already
+      // trust-tagged + safe-by-default.
+      const candidates = readTierCandidates("palace-room", slug);
+      for (const c of candidates) {
+        const lines = c.content.split("\n");
 
-      for (const room of rooms) {
-        const roomPath = path.join(pd, "rooms", room.slug);
-        if (!fs.existsSync(roomPath)) continue;
-        const files = fs.readdirSync(roomPath).filter((f) => f.endsWith(".md"));
-
-        for (const file of files) {
-          const filePath = path.join(roomPath, file);
-          const content = fs.readFileSync(filePath, "utf-8");
-          const lines = content.split("\n");
-
-          for (let i = 0; i < lines.length; i++) {
-            if (lineMatchesQuery(lines[i], keywords)) {
-              const matchIdx = firstMatchIndex(lines[i], keywords);
-              const start = Math.max(0, matchIdx - 40);
-              const end = Math.min(lines[i].length, matchIdx + 80);
-              let excerpt = lines[i].slice(start, end).trim();
-              if (start > 0) excerpt = "..." + excerpt;
-              if (end < lines[i].length) excerpt = excerpt + "...";
-              results.push({ date: `palace:${room.slug}`, section: file.replace(".md", ""), excerpt, line: i + 1 });
-            }
+        for (let i = 0; i < lines.length; i++) {
+          if (lineMatchesQuery(lines[i], keywords)) {
+            const matchIdx = firstMatchIndex(lines[i], keywords);
+            const start = Math.max(0, matchIdx - 40);
+            const end = Math.min(lines[i].length, matchIdx + 80);
+            let excerpt = lines[i].slice(start, end).trim();
+            if (start > 0) excerpt = "..." + excerpt;
+            if (end < lines[i].length) excerpt = excerpt + "...";
+            results.push({ date: `palace:${c.room}`, section: c.file.replace(".md", ""), excerpt, line: i + 1 });
           }
         }
       }

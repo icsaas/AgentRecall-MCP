@@ -1,6 +1,8 @@
 /**
  * identity-trust-completeness.test.mjs — CRITICAL-1 followup (2026-08-20,
  * reports/2026-08-20-identity-trust-review.md, SOP 2b249d59, wave/p1-identity).
+ * Rebuilt at function-scope granularity (2026-08-30, P0 trust-class closure,
+ * wave/pipe-p0-trustclass) — see "THE REBUILD" section below for why.
  *
  * The review's BLOCK verdict on the first fix attempt: `resurrect()` was
  * taught to distrust `source: working-memory-rescue` content, but every
@@ -10,73 +12,105 @@
  * "3 prior waves each missed same-class members" failure pattern this
  * project has already named.
  *
- * This file has two parts, mirroring the shipped fence-completeness harness
- * (packages/mcp-server/test/fence-completeness.test.mjs) at a scale
- * appropriate to a single, narrower class of surface:
+ * PART A — DESTINATION-PROOF (functional, real fixture): plants the exact
+ * red-team CRITICAL-2 spoofed-WM fixture, runs the real rescue sweep, and
+ * asserts the hijacked card cannot outrank/impersonate genuine memory at
+ * every primary surface, plus dedicated destination-proofs for the surfaces
+ * this wave (P0 trust-class closure) newly routed through the shared FETCH
+ * stage.
  *
- *  PART A — DESTINATION-PROOF (functional, real fixture): plants the exact
- *  red-team CRITICAL-2 spoofed-WM fixture, runs the real rescue sweep, and
- *  asserts the hijacked card cannot outrank/impersonate genuine memory at
- *  every one of the FOUR primary surfaces named in the review
- *  (resurrect, smart_recall, journalSearch/"ar search", sessionStart's
- *  recent-today/resume/continuity), plus session_start's "lite" mode.
+ * PART B — COMPLETENESS, journal shape (static, self-discovering).
+ * PART C — COMPLETENESS, palace-room shape (static, self-discovering).
+ * PART D — sync/backfill raw-read closure (a shape neither B nor C's regex
+ * catches — see PART D's own header).
+ * PART E — the includeUntrusted escape-hatch guard (may only appear in
+ * retrieval/query-memory.ts).
+ * PART F — multi-region residual check for the 3 functions whose body mixes
+ * an already-safe region with a still-unsafe one (a collision function-scope
+ * granularity alone cannot separate — see PART F's own header).
  *
- *  PART B — COMPLETENESS (static, self-discovering): scans every .ts source
- *  file under packages/core/src for the SAME shape of risk (a file that
- *  scans a journal/card directory via journalDir(s)/archiveRawDir AND reads
- *  file content) and asserts each discovered file EITHER calls the shared
- *  choke point (journal-filter.ts's isRescueSourcedContent/isRescueSourceTag)
- *  or is explicitly ALLOWLISTED below with a verified, specific reason (never
- *  "not yet audited"). A file matching the pattern with NEITHER fails the
- *  build — this is what makes a future, unenumerated 5th/6th/7th surface
- *  (this pass itself found and fixed FIVE surfaces beyond the review's
- *  original four: recognition-builder.ts, session-start-lite.ts,
- *  activity-feed.ts, context-synthesize.ts, session-end-reflect.ts,
- *  journal-archive.ts, palace/consolidate.ts) impossible to add silently.
+ * ── THE REBUILD (2026-08-30, wave/pipe-p0-trustclass) ──────────────────────
+ * This wave's brief: "the completeness harness is itself class-blind: it
+ * text-matches at WHOLE-FILE granularity, so a file whose unrelated function
+ * calls the trust guard is falsely certified 'safe' even when another
+ * function in the same file reads raw." That is not a hypothetical — while
+ * rebuilding this harness, re-scanning packages/core/src at FUNCTION
+ * granularity surfaced THREE files where the pre-existing (whole-file)
+ * ALLOWLIST's safety argument was true for one exported function but had
+ * never been independently checked for a sibling in the same file:
  *
- * Non-vacuity for Part B is proven by injecting a synthetic fixture file
- * that matches the risk shape but has NO choke call and NO allowlist entry,
- * and asserting the SAME scanner flags it — then discarding the fixture
- * (never touches the real source tree).
+ *   - helpers/journal-files.ts: the OLD reason described
+ *     listJournalFiles()/hasCaptureLogs()/readRecentCaptures() (filename/
+ *     capture-log metadata only). The SAME FILE's readJournalFile() returns
+ *     raw file CONTENT to 4 real callers (journal-read.ts's date branch,
+ *     drill-down.ts's journal branch, the MCP journal-resources.ts "Journal
+ *     Entry" resource, and the CLI's own recent-brief render) with ZERO
+ *     rescue-tag check — this IS gap #1's date-branch and gap #2.
+ *   - palace/rooms.ts: the OLD reason discussed only countRoomEntries
+ *     (count-only, safe). The SAME FILE's ensurePalaceInitialized() also
+ *     matches the palace-room risk shape and had never been independently
+ *     examined — verified SAFE here (a single hardcoded palace-index.json,
+ *     never a room `.md` glob), but that had to be re-derived, not inherited.
+ *   - tools-logic/session-end-reflect.ts: never appeared in the OLD
+ *     ALLOWLIST at all, because a DIFFERENT function in the same file
+ *     (the recent-journals gatherer) already calls isRescueSourcedContent,
+ *     making a whole-file scan see the file as "already fixed" — while
+ *     collectRawUnconsumed, several functions away, reads archiveRawDir()
+ *     raw-archive content with no choke call of its own (verified SAFE here
+ *     by the same structural argument as archive-prune.ts: distillOneSession
+ *     never writes to archiveRawDir(), only archiveSession does).
+ *   - tools-logic/session-start.ts is the sharpest case: `sessionStart`
+ *     itself already calls isRescueSourcedContent at 3 read sites — but
+ *     `autoBackfill`, a separate, non-exported top-level function 300+
+ *     lines further down in the SAME FILE, read BOTH journal and
+ *     palace-room content raw and fed it straight into backfill() ->
+ *     ar_entries with no choke anywhere in ITS OWN body (gap #5). A
+ *     whole-file scan's file-wide CHOKE_PATTERN hit never looks again.
  *
- * Heuristic honesty (same admission fence-completeness.test.mjs makes for
- * its own CLI sub-action detection): this is a text-pattern scan, not a full
- * AST/call-graph analysis. It cannot prove a function reachable only via
- * dynamic dispatch is safe, and it can over-flag a file that merely imports
- * `journalDir` for an unrelated purpose (several allowlist entries below are
- * exactly that — verified by hand-reading, not assumed).
+ * THE FIX: parse every file with the TypeScript compiler API (already used
+ * by ../../mcp-server/test/lib/fence-ast.mjs — REUSED here via a relative
+ * cross-package import, not reimplemented; verified to resolve correctly
+ * under this npm workspace's hoisted node_modules), extract every top-level
+ * function/class-method as its own scannable unit
+ * (test/lib/function-scope.mjs's extractTopLevelUnits), and run the risk/
+ * read/choke regexes against each unit's OWN body instead of the whole file.
  *
- * PART C — added Wave 1 of the shared retrieval pipeline (2026-08-29,
- * reports/2026-08-29-pipe-w1-readers-report.md, plywood SOP 58053587,
- * reports/2026-08-21-architecture-review.md §1.3/§3.4): the architecture
- * review found that THIS harness's own risk pattern
- * (`journalDirs()`/`archiveRawDir()` + `readFileSync()`) does not match the
- * palace-room read shape (`palaceDir()`/`listRooms()` + `readFileSync()`) —
- * so a palace-room reader skipping the rescue-quarantine choke would not be
- * caught even on the next run. Part C mirrors Part B's exact structure
- * (scanner / real-repo assertion / stale-allowlist assertion / non-vacuity
- * RED-then-GREEN proof) for this second risk shape, per the instruction to
- * reuse the completeness-harness pattern rather than invent a new one.
+ * ── TRUSTED WRAPPERS, gated by a LIVE self-check ────────────────────────
+ * This wave deliberately routes fixes through shared FETCH-stage functions
+ * (readTierCandidates, readJournalFile, readRoomContent) rather than
+ * inlining isRescueSourcedContent() at every call site — mirroring
+ * fence-completeness.test.mjs's own outputFenced()/withFenced() trusted-
+ * wrapper pattern. A STATIC trust list would make this gate structurally
+ * unable to go RED (see function-scope.mjs's own header for the empirical
+ * proof: a static list made journalRead/fetchVerbatim/readRoomContent show
+ * hasChoke=true even in TODAY's genuinely-unfixed codebase, because the
+ * literal wrapper name already appears in their source pre-fix). Trust is
+ * instead computed LIVE, once per test run
+ * (computeEffectiveTrustedWrappers), from each wrapper's OWN current body —
+ * exactly like fence-completeness.test.mjs's separate wrapper self-check
+ * section, just gating the SAME test run's caller-level assertions instead
+ * of being a wholly separate describe block.
  *
- * Real-repo finding (verified 2026-08-29, same file-level heuristic
- * granularity as Part B): 28 files match the palace-room risk shape; 6
- * already call the choke (helpers/activity-feed.ts, palace/consolidate.ts,
- * tools-logic/{context-synthesize,journal-search,recognition-builder,
- * session-start}.ts); the remaining 22 are allowlisted below. Several of
- * those 22 are GENUINE, PRE-EXISTING gaps the architecture review already
- * named (tools-logic/{palace-search,palace-walk,palace-lint,check}.ts, and
- * one this pass additionally found — tools-logic/journal-cold-start.ts's
- * top-3-rooms README scan) — Wave 1's scope is "zero existing call sites
- * changed", so these are NOT fixed here; each is allowlisted with an HONEST
- * reason explaining why no rescue-tagged content can reach a room today
- * (the sole ingestion path, palace/consolidate.ts, already calls the choke
- * before writing — see its allowlist reason below) rather than a false
- * claim of structural safety. This is deliberately weaker than Part B's
- * guarantee and is called out as a residual gap in the wave-1 report: it is
- * a WRITE-side-only guarantee, not read-side defense-in-depth, and a future
- * second ingestion path into rooms that bypasses consolidate.ts would
- * silently reintroduce CRITICAL-1's exact vulnerability with zero readers
- * catching it.
+ * ── MVP boundary (documented, not rabbit-holed) ────────────────────────
+ * This is function/method-BODY text-scan granularity — one level finer than
+ * the whole-file scan it replaces, not full cross-file call-graph or
+ * control-flow analysis. Two residual limits, both documented and both
+ * addressed by a NARROW, EXPLICIT (not generalized) companion mechanism
+ * rather than a deeper AST rabbit hole:
+ *   1. A function whose body mixes an ALREADY-safe region with a
+ *      STILL-unsafe one defeats function-level granularity the same way
+ *      whole-file granularity was defeated (verified empirically for
+ *      journalRead, journalSearch, fetchVerbatim while building this
+ *      harness) — closed by PART F's small, hand-enumerated per-branch
+ *      residual check (AST IfStatement boundaries, not brace-counting).
+ *   2. autoBackfill bypasses the risk-pattern regexes ENTIRELY (it calls
+ *      projectSubPath()+raw path.join(), never journalDirs()/archiveRawDir()/
+ *      palaceDir()/listRooms()) — undetectable by broadening a regex without
+ *      false-positiving on unrelated code; closed by PART D's dedicated,
+ *      name-based check instead (the SOP's own documented alternative for
+ *      exactly this case).
+ * A future wave generalizing either to automatic, whole-tree branch/call-
+ * graph discovery is a documented follow-up, not attempted here.
  */
 
 import { describe, it, before, after, beforeEach } from "node:test";
@@ -85,217 +119,169 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
+import { extractTopLevelFunction, extractSwitchCases, extractSubActions } from "../../mcp-server/test/lib/fence-ast.mjs";
+import {
+  CORE_SRC,
+  CHOKE_PATTERN,
+  extractTopLevelUnits,
+  extractFunctionIfBranches,
+  computeEffectiveTrustedWrappers,
+  isChokedUnit,
+  walkTsFiles,
+  stripComments,
+} from "./lib/function-scope.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CORE_SRC = path.join(__dirname, "..", "src");
+const CLI_SRC = path.join(__dirname, "..", "..", "cli", "src", "index.ts");
 
 // ─────────────────────────────────────────────────────────────────────────
-// PART B helpers — the scanner, shared between the real-repo assertion and
-// the non-vacuity proof below.
+// PART B — journal shape, function-scope.
 // ─────────────────────────────────────────────────────────────────────────
 
-const RISK_PATTERN = /\bjournalDirs?\(|\barchiveRawDir\(/;
+// Broadened from the original (`journalDirs?\(|archiveRawDir\(`) to also
+// catch `listJournalFiles(` — the original regex missed journal-read.ts's
+// `journalRead` "latest" branch ENTIRELY (whole file, not just whole
+// function): it never calls journalDirs()/archiveRawDir() directly, it
+// calls listJournalFiles() (a metadata-only reader, itself safe) and then
+// does its OWN raw fs.readFileSync — the actual risk is exactly THAT
+// combination (a shared file-listing call plus a hand-rolled read that
+// bypasses readJournalFile's choke), which is a genuinely different, wider
+// risk shape than the original regex named. helpers/handoff.ts's
+// generateHandoff and tools-logic/journal-list.ts's journalList were found
+// the same way (both genuine, previously-uncaught raw reads — see this
+// wave's PR report; both fixed alongside the 6 named gaps).
+const RISK_PATTERN = /\bjournalDirs?\(|\barchiveRawDir\(|\blistJournalFiles\(/;
+const PALACE_RISK_PATTERN = /\bpalaceDir\(|\blistRooms\(/;
 const READ_PATTERN = /\breadFileSync\(/;
-const CHOKE_PATTERN = /isRescueSourcedContent\(|isRescueSourceTag\(/;
 
 /**
- * @param {string} srcRoot directory to walk (real repo, or a synthetic fixture root)
- * @returns {{file: string, hasChoke: boolean}[]} every file matching the risk shape
+ * @param {string} srcRoot
+ * @param {string[]} effectiveWrappers
+ * @returns {{file: string, unit: string, hasChoke: boolean}[]} every UNIT matching the risk shape
  */
-function scanForUnchokedJournalReaders(srcRoot) {
+async function scanForUnchokedJournalReaders(srcRoot, effectiveWrappers) {
   const results = [];
-  function walk(dir) {
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === "node_modules" || entry.name === "dist") continue;
-        walk(full);
-      } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
-        const text = fs.readFileSync(full, "utf-8");
-        if (RISK_PATTERN.test(text) && READ_PATTERN.test(text)) {
-          results.push({ file: path.relative(srcRoot, full), hasChoke: CHOKE_PATTERN.test(text) });
-        }
+  for (const full of walkTsFiles(srcRoot)) {
+    const text = fs.readFileSync(full, "utf-8");
+    if (!(RISK_PATTERN.test(text) && READ_PATTERN.test(text))) continue;
+    const rel = path.relative(srcRoot, full);
+    const units = await extractTopLevelUnits(full);
+    for (const u of units) {
+      if (RISK_PATTERN.test(u.text) && READ_PATTERN.test(u.text)) {
+        results.push({ file: rel, unit: u.id, hasChoke: isChokedUnit(u.text, effectiveWrappers) });
       }
     }
   }
-  walk(srcRoot);
   return results;
 }
 
 /**
- * ALLOWLIST — every file the scanner flags in the REAL repo that does not
- * call the choke point directly, with a reason verified by hand-reading the
- * file (not a placeholder). Each reason states WHY the file can never
- * surface a working-memory-rescue card's content the way the four primary
- * surfaces could.
+ * ALLOWLIST_B — every {file, unit} the journal-shape scanner flags in the
+ * REAL repo that is not choked, with a reason verified by hand-reading THAT
+ * SPECIFIC FUNCTION (not inherited from a sibling in the same file — see
+ * this file's header for why that distinction is the whole point of this
+ * rebuild). Keyed `"<file>::<unit>"`.
  */
-const ALLOWLIST = {
-  "helpers/journal-files.ts":
-    "listJournalFiles()/hasCaptureLogs()/readRecentCaptures() return filename METADATA " +
-    "(date/file/dir) or capture-log (`--capture--`/`-log.md`) content — a file class " +
-    "working-memory.ts's distillOneSession never writes to. listJournalFiles itself never " +
-    "returns file CONTENT to its callers.",
-  "storage/archive-prune.ts":
-    "operates exclusively on archiveRawDir() (the raw hook-archive tier, " +
-    "`${date}--${sid}.md`) — writeSessionCard/distillOneSession write ONLY to " +
-    "journalDir()'s `${date}--card--${sid}.md`, a different directory and naming " +
-    "convention. Pure gzip/delete maintenance; never surfaces content to a caller.",
-  "storage/corrections.ts":
-    "the journalDir() scan (buildUnknownVerdictCandidates) collects file PATHS only " +
-    "into `journal_file_paths` for a diagnostic record — never reads their content. " +
-    "Every readFileSync in this file targets corrections/*.json, a different directory.",
-  "tools-logic/alignment-check.ts":
-    "reads exactly one self-authored file by constructed exact path " +
-    "(`${date}-alignment.md`) — never enumerates/globs journalDir's arbitrary `.md` " +
-    "files, so a `--card--` file can never be the one read here.",
-  "tools-logic/drill-down.ts":
-    "operates exclusively on archiveRawDir() (the raw hook-archive tier) — same " +
-    "directory/naming argument as storage/archive-prune.ts above.",
-  "tools-logic/journal-merge.ts":
-    "explicit, opt-in, human/agent-directed two-file merge tool — the caller must " +
-    "already know and pass both exact filenames; not a generic 'rank/return whatever " +
-    "is in this directory' surface an agent hits passively.",
-  "tools-logic/journal-state.ts":
-    "reads a per-date `${date}.state.json` SIDECAR (JSON bookkeeping metadata) — " +
-    "writeSessionCard/distillOneSession never write this file type.",
-  "tools-logic/journal-write.ts":
-    "read-modify-write of the CURRENT day's OWN file, solely to decide the append/" +
-    "replace heading for the write journal_write is about to perform — a write-path " +
-    "decision, not a memory-retrieval surface returning content to a NEW agent.",
-  "tools-logic/session-end.ts":
+const ALLOWLIST_B = {
+  "helpers/journal-files.ts::hasCaptureLogs":
+    "returns a boolean derived from capture-log (`--capture--`/`-log.md`) content only — " +
+    "a file class working-memory.ts's distillOneSession never writes to (it writes " +
+    "`<date>--card--<sid>.md` via writeSessionCard). Never returns file content to its caller.",
+  "helpers/journal-files.ts::readRecentCaptures":
+    "reads capture-log (`--capture--`/`-log.md`) content only — the SAME distinct file class " +
+    "as hasCaptureLogs above, never the `--card--` naming distillOneSession writes.",
+  "retrieval/query-memory.ts::readLegacyJournalCandidates":
+    "(Wave 2, 2026-08-30, plywood SOP ecbd4351) sets `untrusted:false` deliberately (documented " +
+    "inline): this is a small, self-contained legacy-directory read of pre-package content that " +
+    "predates the working-memory-rescue mechanism's existence entirely, so it structurally cannot " +
+    "carry a `source: working-memory-rescue` tag.",
+  "storage/archive-prune.ts::pruneRawArchive":
+    "operates exclusively on archiveRawDir() (the raw hook-archive tier, `${date}--${sid}.md`) — " +
+    "writeSessionCard/distillOneSession write ONLY to journalDir()'s `${date}--card--${sid}.md`, a " +
+    "different directory and naming convention. Pure gzip/delete maintenance; never surfaces " +
+    "content to a caller (result carries only counts).",
+  "storage/corrections.ts::listUnknownVerdicts":
+    "the journalDir() scan collects file PATHS only into `journal_file_paths` for a diagnostic " +
+    "record — never reads their content. Every readFileSync in this function targets " +
+    "outcomes.jsonl, a different file entirely.",
+  "tools-logic/alignment-check.ts::alignmentCheck":
+    "reads exactly one self-authored file by constructed exact path (`${date}-alignment.md`) — " +
+    "never enumerates/globs journalDir's arbitrary `.md` files, so a `--card--` file can never be " +
+    "the one read here.",
+  "tools-logic/journal-cold-start.ts::journalColdStart":
+    "(KNOWN GAP, pre-existing, out of this wave's fix scope) reads a `fullPath` journal-ish entry " +
+    "in addition to the top-3-rooms README scan named in ALLOWLIST_C — architecture review " +
+    "2026-08-21 already deferred this surface for Wave 1 ('zero existing call sites changed'); " +
+    "carried forward here unfixed, not silently re-certified, at the finer function-scope grain.",
+  "tools-logic/journal-merge.ts::journalMerge":
+    "explicit, opt-in, human/agent-directed two-file merge tool — the caller must already know " +
+    "and pass both exact filenames; not a generic 'rank/return whatever is in this directory' " +
+    "surface an agent hits passively.",
+  "tools-logic/journal-write.ts::journalWrite":
+    "read-modify-write of the CURRENT day's OWN file, solely to decide the append/replace heading " +
+    "for the write journal_write is about to perform — a write-path decision, not a memory-" +
+    "retrieval surface returning content to a NEW agent.",
+  "tools-logic/session-end-reflect.ts::collectRawUnconsumed":
+    "(function-scope correction, 2026-08-30 — this file was NEVER in the old whole-file ALLOWLIST " +
+    "because a DIFFERENT function in the same file already calls the choke, masking this one) " +
+    "reads archiveRawDir() raw-archive content only — the SAME structural argument as " +
+    "archive-prune.ts above: distillOneSession/writeSessionCard never write to archiveRawDir(), " +
+    "only archiveSession does, so a rescue card can never be one of these raw segments.",
+  "tools-logic/session-end.ts::sessionEnd":
     "two internal heuristics, both non-surfacing: (a) a boolean `.includes(\"## Brief\")` " +
-    "existence check on today's own files to choose a heading (a rescue card's body " +
-    "never contains that heading); (b) merge-suggestion keyword-overlap scan whose " +
-    "output (`MergeSuggestion`) carries only a filename + keyword LIST + a templated " +
-    "reason string — never the raw file excerpt itself.",
-  "retrieval/query-memory.ts":
-    "(Wave 2, 2026-08-30, plywood SOP ecbd4351) TEXT-HEURISTIC FALSE POSITIVE: this " +
-    "file's only literal occurrences of `journalDirs(`/`archiveRawDir(` are inside doc " +
-    "comments describing OTHER functions' behavior for context (e.g. explaining why " +
-    "`scoreJournalTier` defaults `includeRollupArchive:true` to match `journalSearch()`'s " +
-    "own `journalDirs(slug,true)` call) — grep-verified zero EXECUTABLE call to either " +
-    "function anywhere in this file. Every journal candidate this file's `queryMemory()` " +
-    "pipeline touches (live, rollup-archive, and raw-archive) comes from " +
-    "`readTierCandidates()` (Wave 1's sanctioned reader, which already calls the choke " +
-    "internally) via this file's own `trustFilter()` (filters `candidate.untrusted` " +
-    "BEFORE any scoring/matching touches content) — this file does not re-derive trust " +
-    "itself because the upstream reader already computed it correctly; re-parsing " +
-    "frontmatter here would be duplicated work, not additional safety. The one exception " +
-    "— `readLegacyJournalCandidates()`'s small, self-contained legacy-directory read — " +
-    "sets `untrusted:false` deliberately (documented inline): legacy pre-package content " +
-    "predates the working-memory-rescue mechanism's existence entirely, so it structurally " +
-    "cannot carry a `source: working-memory-rescue` tag.",
+    "existence check on today's own files to choose a heading (a rescue card's body never " +
+    "contains that heading); (b) merge-suggestion keyword-overlap scan whose output " +
+    "(`MergeSuggestion`) carries only a filename + keyword LIST + a templated reason string — " +
+    "never the raw file excerpt itself.",
 };
 
 const MIN_REASON_LENGTH = 40;
 
-// ─────────────────────────────────────────────────────────────────────────
-// PART B — completeness assertions against the REAL repo.
-// ─────────────────────────────────────────────────────────────────────────
-
-describe("identity-trust completeness (CRITICAL-1 followup, 2026-08-20)", () => {
-  it("every journal/card-content-reading file in packages/core/src either calls the shared choke, or is allowlisted with a real reason", () => {
-    const discovered = scanForUnchokedJournalReaders(CORE_SRC);
-    assert.ok(discovered.length > 0, "sanity: the scanner must find at least the known choke-calling files (journal-search.ts, resurrect.ts, session-start.ts, ...) — zero results means the pattern itself is broken");
+describe("identity-trust completeness — journal shape (function-scope rebuild, 2026-08-30)", () => {
+  it("every journal-shape UNIT in packages/core/src either calls the shared choke (directly, or via a LIVE-verified trusted wrapper), or is allowlisted with a real reason", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanForUnchokedJournalReaders(CORE_SRC, effectiveWrappers);
+    assert.ok(discovered.length > 0, "sanity: the scanner must find at least the known choke-calling units — zero results means the pattern itself is broken");
 
     const unclassified = [];
-    for (const { file, hasChoke } of discovered) {
+    for (const { file, unit, hasChoke } of discovered) {
       if (hasChoke) continue;
-      const reason = ALLOWLIST[file];
-      if (!reason || reason.trim().length < MIN_REASON_LENGTH) {
-        unclassified.push(file);
-      }
+      const key = `${file}::${unit}`;
+      const reason = ALLOWLIST_B[key];
+      if (!reason || reason.trim().length < MIN_REASON_LENGTH) unclassified.push(key);
     }
     assert.deepEqual(
       unclassified,
       [],
-      `${unclassified.length} file(s) scan a journal/card directory and read file content, ` +
-      `but neither call the shared choke (isRescueSourcedContent/isRescueSourceTag) nor carry ` +
-      `an allowlist reason: ${unclassified.join(", ")}. Classify each in this test's ALLOWLIST ` +
-      `(with a real, verified reason) or add the choke call before this can go green.`,
+      `${unclassified.length} journal-shape unit(s) are neither choked nor allowlisted: ${unclassified.join(", ")}. ` +
+      `Classify each in ALLOWLIST_B (with a real, verified reason) or route it through the shared choke.`,
     );
   });
 
-  it("every ALLOWLIST entry still exists on disk and is still flagged by the scanner (stale entries are not silently ignored)", () => {
-    const discovered = scanForUnchokedJournalReaders(CORE_SRC);
-    const discoveredFiles = new Set(discovered.map((d) => d.file));
-    for (const file of Object.keys(ALLOWLIST)) {
-      assert.ok(
-        fs.existsSync(path.join(CORE_SRC, file)),
-        `allowlist entry "${file}" does not exist on disk — remove the stale entry`,
-      );
-      assert.ok(
-        discoveredFiles.has(file),
-        `allowlist entry "${file}" is no longer flagged by the scanner (e.g. it stopped reading ` +
-        `journal content, or the risk pattern moved) — remove the stale entry so the allowlist ` +
-        `stays a true reflection of live risk, not accumulated cruft`,
-      );
+  it("every ALLOWLIST_B entry is still flagged by the scanner (stale entries are not silently ignored)", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanForUnchokedJournalReaders(CORE_SRC, effectiveWrappers);
+    const discoveredKeys = new Set(discovered.map((d) => `${d.file}::${d.unit}`));
+    for (const key of Object.keys(ALLOWLIST_B)) {
+      assert.ok(discoveredKeys.has(key), `allowlist entry "${key}" is no longer flagged by the scanner — remove the stale entry`);
     }
   });
 
-  // ── Non-vacuity proof ────────────────────────────────────────────────────
-  describe("non-vacuity: the scanner actually catches a new unchoked surface", () => {
+  describe("non-vacuity: the function-scope scanner catches a new unchoked FUNCTION even in an otherwise-safe file", () => {
     let fixtureRoot;
+    before(() => { fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-p0-trustclass-journal-fixture-")); });
+    after(() => { fs.rmSync(fixtureRoot, { recursive: true, force: true }); });
 
-    before(() => {
-      fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-identity-trust-completeness-fixture-"));
-    });
-    after(() => {
-      fs.rmSync(fixtureRoot, { recursive: true, force: true });
-    });
-
-    it("RED: a synthetic new surface that scans journalDir + reads content, with NO choke call, is flagged", () => {
-      const fixtureFile = path.join(fixtureRoot, "tools-logic", "hypothetical-new-tool.ts");
+    it("RED: a file with ONE safe (choked) function and ONE new unchoked function is flagged for the unchoked one ONLY — proving function granularity, not whole-file", async () => {
+      const fixtureFile = path.join(fixtureRoot, "tools-logic", "mixed-file.ts");
       fs.mkdirSync(path.dirname(fixtureFile), { recursive: true });
       fs.writeFileSync(
         fixtureFile,
         [
           `import * as fs from "node:fs";`,
           `import { journalDirs } from "../storage/paths.js";`,
-          `export function hypotheticalNewTool(project) {`,
-          `  const dirs = journalDirs(project);`,
-          `  for (const dir of dirs) {`,
-          `    for (const f of fs.readdirSync(dir)) {`,
-          `      const content = fs.readFileSync(dir + "/" + f, "utf-8");`,
-          `      console.log(content); // returns raw content to a caller — no rescue check`,
-          `    }`,
-          `  }`,
-          `}`,
-        ].join("\n"),
-        "utf-8",
-      );
-
-      const discovered = scanForUnchokedJournalReaders(fixtureRoot);
-      const flagged = discovered.find((d) => d.file === path.join("tools-logic", "hypothetical-new-tool.ts"));
-      assert.ok(flagged, "the scanner must flag the synthetic unchoked surface");
-      assert.equal(flagged.hasChoke, false, "the synthetic surface has no choke call — hasChoke must be false");
-
-      // Reproduce the REAL assertion's failure mode against this fixture,
-      // proving the completeness test itself (not just the scanner) goes RED
-      // for a surface with no allowlist entry.
-      assert.throws(() => {
-        const unclassified = discovered.filter((d) => !d.hasChoke && !ALLOWLIST[d.file]);
-        if (unclassified.length > 0) {
-          throw new Error(`unclassified: ${unclassified.map((d) => d.file).join(", ")}`);
-        }
-      }, /unclassified/, "a new surface with no choke call and no allowlist entry must fail the completeness check");
-    });
-
-    it("GREEN: the SAME synthetic surface stops being flagged once it calls the choke", () => {
-      const fixtureFile = path.join(fixtureRoot, "tools-logic", "hypothetical-new-tool-fixed.ts");
-      fs.writeFileSync(
-        fixtureFile,
-        [
-          `import * as fs from "node:fs";`,
-          `import { journalDirs } from "../storage/paths.js";`,
           `import { isRescueSourcedContent } from "../helpers/journal-filter.js";`,
-          `export function hypotheticalNewTool(project) {`,
+          `export function safeReader(project) {`,
           `  const dirs = journalDirs(project);`,
           `  for (const dir of dirs) {`,
           `    for (const f of fs.readdirSync(dir)) {`,
@@ -305,235 +291,162 @@ describe("identity-trust completeness (CRITICAL-1 followup, 2026-08-20)", () => 
           `    }`,
           `  }`,
           `}`,
+          `export function unsafeReader(project) {`,
+          `  const dirs = journalDirs(project);`,
+          `  for (const dir of dirs) {`,
+          `    for (const f of fs.readdirSync(dir)) {`,
+          `      const content = fs.readFileSync(dir + "/" + f, "utf-8");`,
+          `      console.log(content); // no rescue check — must be flagged`,
+          `    }`,
+          `  }`,
+          `}`,
         ].join("\n"),
         "utf-8",
       );
-      const discovered = scanForUnchokedJournalReaders(fixtureRoot);
-      const flagged = discovered.find((d) => d.file === path.join("tools-logic", "hypothetical-new-tool-fixed.ts"));
-      assert.ok(flagged, "the scanner should still discover the file (it matches the risk pattern)");
-      assert.equal(flagged.hasChoke, true, "once the choke call is present, hasChoke must flip to true");
+      const discovered = await scanForUnchokedJournalReaders(fixtureRoot, []);
+      const safe = discovered.find((d) => d.unit === "safeReader");
+      const unsafe = discovered.find((d) => d.unit === "unsafeReader");
+      assert.ok(safe, "sanity: safeReader must be discovered");
+      assert.ok(unsafe, "sanity: unsafeReader must be discovered");
+      assert.equal(safe.hasChoke, true, "safeReader calls isRescueSourcedContent directly — must show hasChoke=true");
+      assert.equal(unsafe.hasChoke, false, "unsafeReader has NO choke call anywhere in ITS OWN body — must show hasChoke=false, even though its SIBLING function in the same file is safe (the exact whole-file-masking bug this rebuild removes)");
     });
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// PART C — palace-room risk shape (Wave 1, 2026-08-29). Mirrors Part B
-// exactly, for the `palaceDir()`/`listRooms()` + `readFileSync()` shape the
-// architecture review found Part B's own regex does NOT catch. See this
-// file's header comment (Part C section) for the real-repo finding summary.
+// PART C — palace-room shape, function-scope. Mirrors Part B's structure.
 // ─────────────────────────────────────────────────────────────────────────
 
-const PALACE_RISK_PATTERN = /\bpalaceDir\(|\blistRooms\(/;
-// READ_PATTERN and CHOKE_PATTERN are the same as Part B's — reused below.
-
-/**
- * @param {string} srcRoot directory to walk (real repo, or a synthetic fixture root)
- * @returns {{file: string, hasChoke: boolean}[]} every file matching the palace-room risk shape
- */
-function scanForUnchokedPalaceRoomReaders(srcRoot) {
+async function scanForUnchokedPalaceRoomReaders(srcRoot, effectiveWrappers) {
   const results = [];
-  function walk(dir) {
-    let entries;
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === "node_modules" || entry.name === "dist") continue;
-        walk(full);
-      } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
-        const text = fs.readFileSync(full, "utf-8");
-        if (PALACE_RISK_PATTERN.test(text) && READ_PATTERN.test(text)) {
-          results.push({ file: path.relative(srcRoot, full), hasChoke: CHOKE_PATTERN.test(text) });
-        }
+  for (const full of walkTsFiles(srcRoot)) {
+    const text = fs.readFileSync(full, "utf-8");
+    if (!(PALACE_RISK_PATTERN.test(text) && READ_PATTERN.test(text))) continue;
+    const rel = path.relative(srcRoot, full);
+    const units = await extractTopLevelUnits(full);
+    for (const u of units) {
+      if (PALACE_RISK_PATTERN.test(u.text) && READ_PATTERN.test(u.text)) {
+        results.push({ file: rel, unit: u.id, hasChoke: isChokedUnit(u.text, effectiveWrappers) });
       }
     }
   }
-  walk(srcRoot);
   return results;
 }
 
 /**
- * ALLOWLIST — every file the palace-room scanner flags in the REAL repo that
- * does not call the choke point, with a reason verified by hand-reading the
- * file. Two different KINDS of reason appear below, and each entry says
- * which kind it is:
- *
- *  (SAFE) — the file structurally cannot surface a rescue-tagged file's
- *  content the way a room-content retrieval surface could: it reads a
- *  single hardcoded/caller-specified file (not a directory glob over
- *  arbitrary room content), reads metadata/JSON only, reads its OWN write
- *  target to decide append-vs-replace (a write-path decision, not a
- *  retrieval surface), or reads a DIFFERENT palace tier (pipeline/, skills/)
- *  that has zero verified ingestion path from journal/working-memory-rescue
- *  content — unlike rooms/, which consolidate.ts populates FROM journal
- *  content (and consolidate.ts already calls the choke before that write).
- *
- *  (KNOWN GAP) — the file genuinely globs a room's `.md` content and
- *  returns/uses it without a choke call. No rescue-tagged content can
- *  reach a room TODAY only because the sole ingestion path
- *  (palace/consolidate.ts) already filters at write time — this is a
- *  write-side-only guarantee, not read-side defense-in-depth (the exact
- *  distinction CRITICAL-1 was about). Fixing these is explicitly OUT OF
- *  SCOPE for Wave 1 ("zero existing call sites changed") — tracked here so
- *  the harness doesn't silently create a build failure for a pre-existing,
- *  now-documented gap, and so a future wave has a ready-made worklist.
+ * ALLOWLIST_C — same rules as ALLOWLIST_B, palace-room risk shape. Two
+ * kinds of reason, each entry says which:
+ *  (SAFE) — structurally cannot surface a rescue-tagged file's content the
+ *  way a room-content retrieval surface could.
+ *  (KNOWN GAP) — genuinely globs a room's `.md` content without a choke;
+ *  no rescue-tagged content reaches a room TODAY only because the sole
+ *  ingestion path (palace/consolidate.ts) already filters at write time —
+ *  a write-side-only guarantee, explicitly out of THIS wave's fix scope
+ *  (already deferred by the 2026-08-21 architecture review / Wave 1).
  */
-const ALLOWLIST_PALACE = {
-  "palace/identity.ts":
+const ALLOWLIST_C = {
+  "palace/compress.ts::compressTopic":
+    "(SAFE) reads room topic files purely to compute cluster STATISTICS — `CompressResult` carries " +
+    "only counts (entriesBefore/After, clustersFound/Merged, archivedEntries), never file content.",
+  "palace/fan-out.ts::fanOut":
+    "(SAFE) reads up to 3 room files' first 300 chars purely to extract KEYWORDS for an internal " +
+    "auto-linking decision — `FanOutResult` carries only `{updatedRooms, newEdges}`, never content.",
+  "palace/identity.ts::readIdentity":
     "(SAFE) reads exactly one hardcoded file, `identity.md`, at a fixed path — never a directory " +
     "glob over `rooms/<slug>/*.md`; identity.md is never written by consolidate.ts or working-memory rescue.",
-  "palace/rooms.ts":
-    "(SAFE) countRoomEntries() reads every room `.md` file purely to COUNT `### ` entry-header lines " +
-    "— it returns only a number to its callers (listRooms's own sort, recordAccess's salience calc, " +
-    "regenerateRoomsIndex's entry column), never the matched content itself.",
-  "palace/pipeline.ts":
-    "(SAFE) reads the palace/pipeline/ tier (numbered `NNNN-slug.md` milestone files, its own " +
-    "phase/order/status frontmatter schema) — a DIFFERENT tier from rooms/, populated exclusively " +
-    "by the pipeline_open/close/current/list/show tool family; grep-verified zero import of " +
-    "palace/consolidate.ts or storage/working-memory.ts anywhere in that family.",
-  "palace/skills.ts":
-    "(SAFE) reads the palace/skills/ tier — a DIFFERENT tier from rooms/, populated exclusively by " +
-    "skill_write/skill_propose; grep-verified zero import of palace/consolidate.ts or " +
-    "storage/working-memory.ts in that family.",
-  "palace/fan-out.ts":
-    "(SAFE) reads up to 3 room files' first 300 chars purely to extract KEYWORDS for an internal " +
-    "auto-linking decision — `FanOutResult` carries only `{updatedRooms, newEdges}`, never file " +
-    "content, so even if a rescue-tagged file existed in a room, its content is never returned to a caller.",
-  "palace/compress.ts":
-    "(SAFE) reads room topic files purely to compute cluster STATISTICS — `CompressResult` carries " +
-    "only counts (entriesBefore/After, clustersFound/Merged, archivedEntries), never file content or " +
-    "excerpts, to any caller.",
-  "storage/behavior-policies.ts":
-    "(SAFE) reads one hardcoded JSON file (`behavior-policies.json`) at a fixed path via palaceDir() " +
-    "— never a directory glob over room `.md` content.",
-  "storage/cwd-allowlist.ts":
-    "(SAFE) reads one hardcoded JSON file (`cwd-allowlist.json`) at a fixed path via palaceDir() — " +
-    "never a directory glob over room `.md` content.",
-  "tools-logic/alignment-check.ts":
+  "palace/rooms.ts::countRoomEntries":
+    "(SAFE) reads every room `.md` file purely to COUNT `### ` entry-header lines — returns only a " +
+    "number to its callers, never the matched content itself.",
+  "palace/rooms.ts::ensurePalaceInitialized":
+    "(SAFE, function-scope correction 2026-08-30 — never independently examined under the old " +
+    "whole-file scan, which only discussed this file's countRoomEntries) reads exactly one hardcoded " +
+    "metadata file, `palace-index.json` (JSON.parse'd to decide whether default rooms need " +
+    "migrating in) — never a directory glob over room `.md` content.",
+  "tools-logic/alignment-check.ts::alignmentCheck":
     "(SAFE) reads exactly one self-authored file by constructed exact path (`${date}-alignment.md`, " +
     "a top-level palace file, not inside `rooms/`) — never enumerates/globs room content.",
-  "tools-logic/bootstrap.ts":
-    "(SAFE) its only palaceDir() read is one hardcoded file, `identity.md`, at a fixed path (cold-" +
-    "start context assembly) — never a directory glob over `rooms/<slug>/*.md`.",
-  "tools-logic/check.ts":
+  "tools-logic/bootstrap.ts::bootstrapImport":
+    "(SAFE) its palaceDir() read is ONE hardcoded file, `identity.md`, for the JUST-CREATED project " +
+    "being imported (never a directory glob over `rooms/<slug>/*.md`). Its OTHER readFileSync in the " +
+    "same function (`readmePath`) reads the EXTERNAL SOURCE project's own README.md — a completely " +
+    "different filesystem location (the scanned project directory, e.g. ~/Projects/whatever/) that " +
+    "AgentRecall's own rescue mechanism can never write to (it only ever writes under this store's " +
+    "own projects/<slug>/journal|palace).",
+  "tools-logic/check.ts::check":
     "(KNOWN GAP) the alignment-room scanner globs that room's `.md` files (excluding README.md/" +
     "_room.json) and returns parsed correction excerpts to the caller — architecture review 2026-08-21 " +
-    "already named this surface; see Part C's header comment for why this is write-side-only-safe today.",
-  "tools-logic/drill-down.ts":
-    "(SAFE) reads a CALLER-SPECIFIED single room+file (`rooms/${safeRoom}/${safeFile}.md`, an explicit " +
-    "fetch-by-key) — never enumerates/globs a room's arbitrary content, same argument as journal-merge.ts's " +
-    "existing Part B allowlist entry.",
-  "tools-logic/journal-cold-start.ts":
-    "(KNOWN GAP) iterates listRooms() and reads each of the top-3 rooms' README.md into the cold-start " +
-    "bootstrap dump — found while extending this harness for Wave 1; not previously named by the " +
-    "2026-08-21 architecture review. See Part C's header comment for why this is write-side-only-safe today.",
-  "tools-logic/journal-write.ts":
+    "already named this surface; write-side-only-safe today via consolidate.ts's write-time choke.",
+  "tools-logic/journal-cold-start.ts::journalColdStart":
+    "(KNOWN GAP) iterates listRooms() and reads each of the top-3 rooms' README.md into the cold-" +
+    "start bootstrap dump — found while extending this harness for Wave 1; not previously named by " +
+    "the 2026-08-21 architecture review. Write-side-only-safe today via consolidate.ts.",
+  "tools-logic/journal-write.ts::journalWrite":
     "(SAFE) its palaceDir() usage is WRITE-only (constructs `rooms/<slug>/<topic>.md` as an append " +
     "target for journal_write's optional palace_room routing) — the file's readFileSync calls target " +
     "only its OWN today's journal file (a write-path append/replace decision), never room content.",
-  "tools-logic/knowledge-write.ts":
+  "tools-logic/knowledge-write.ts::knowledgeWrite":
     "(SAFE) readFileSync(topicPath) is a read-BEFORE-write dedup check on its OWN write target " +
     "(knowledge_write's own topic file) to decide append-vs-skip — a write-path decision, never a " +
     "retrieval surface returning content to a new caller.",
-  "tools-logic/palace-lint.ts":
+  "tools-logic/palace-lint.ts::palaceLint":
     "(KNOWN GAP) globs each room's `.md` files (excluding README.md) to lint entry structure and " +
     "reports issues that echo content fragments — architecture review 2026-08-21 already named this " +
-    "surface; see Part C's header comment for why this is write-side-only-safe today.",
-  "tools-logic/palace-read.ts":
+    "surface; write-side-only-safe today via consolidate.ts.",
+  "tools-logic/palace-read.ts::palaceRead":
     "(SAFE) reads a CALLER-SPECIFIED single room+topic (defaulting to README when topic is omitted) — " +
-    "an explicit fetch-by-key, same argument as drill-down.ts, never a passive multi-room scan.",
-  "tools-logic/palace-search.ts":
+    "an explicit fetch-by-key, never a passive multi-room scan.",
+  "tools-logic/palace-search.ts::palaceSearch":
     "(KNOWN GAP) globs every room's `.md` files (including README.md) and returns scored excerpts to " +
-    "the caller — architecture review 2026-08-21 already named this surface; see Part C's header " +
-    "comment for why this is write-side-only-safe today. This is the PRIMARY room-content retrieval " +
-    "surface Wave 2's queryMemory() migration should prioritize.",
-  "tools-logic/palace-walk.ts":
-    "(KNOWN GAP) readRoomContent() globs every room's `.md` files (including README.md) and returns " +
-    "concatenated content to the caller — architecture review 2026-08-21 already named this surface; " +
-    "see Part C's header comment for why this is write-side-only-safe today.",
-  "tools-logic/palace-write.ts":
-    "(SAFE) readFileSync(targetFile) is a read-BEFORE-write check on its OWN write target (palace_write's " +
-    "own topic file) to decide append-vs-replace — a write-path decision, never a retrieval surface.",
-  "tools-logic/session-end.ts":
+    "the caller — architecture review 2026-08-21 already named this surface as the PRIMARY room-" +
+    "content retrieval target for a future queryMemory() migration; write-side-only-safe today.",
+  "tools-logic/palace-write.ts::palaceWrite":
+    "(SAFE) readFileSync(targetFile) is a read-BEFORE-write check on its OWN write target " +
+    "(palace_write's own topic file) to decide append-vs-replace — a write-path decision.",
+  "tools-logic/session-end.ts::sessionEnd":
     "(SAFE) its only listRooms() use maps to `{name}` for a printed summary (no content read); every " +
-    "readFileSync in this file targets journal-tier files (jDir), never room content — false-positive " +
-    "co-occurrence of the two independent patterns in one file (same heuristic-honesty limit Part B " +
-    "already documents).",
-  "tools-logic/smart-recall.ts":
-    "(SAFE) its only palaceDir() use is a graph-edge lookup (getConnectedRooms, for the 1-hop related-" +
-    "room walk) — never a content read. Wave 2 (2026-08-30) removed this file's OWN archiveRawDir() " +
-    "readFileSync entirely (moved to retrieval/query-memory.ts's queryArchiveFallback, see that file's " +
-    "own allowlist entry below) — the only readFileSync remaining in this file targets feedback-log.json " +
-    "(a JSON bookkeeping file for the Beta-feedback multiplier), never room or journal content.",
-  "retrieval/query-memory.ts":
-    "(SAFE) `listRooms(project)` is used ONLY to build a room-slug -> salience METADATA map " +
-    "(`scorePalaceTier`'s salience blend, mirroring palace-search.ts's own `roomMeta.salience` read) — " +
-    "it returns RoomMeta objects (slug/salience/etc.), never file content. Actual room-file CONTENT comes " +
-    "exclusively from `readTierCandidates(\"palace-room\", ...)` (Wave 1's sanctioned reader, choke already " +
-    "applied at fetch time) via this file's own `trustFilter()`, which runs BEFORE any per-line matching " +
-    "touches a candidate's content — this is the SANCTIONED pattern Wave 1/2 exist to establish, not a gap. " +
-    "(This file has no `palaceDir(` call at all this scanner's alternation could match — only the one " +
-    "genuine `listRooms()` metadata call above trips PALACE_RISK_PATTERN.)",
+    "readFileSync in this file targets journal-tier files, never room content — false-positive " +
+    "co-occurrence of the two independent patterns in one function.",
 };
 
 const MIN_PALACE_REASON_LENGTH = 40;
 
-describe("identity-trust completeness — palace-room shape (Wave 1, 2026-08-29)", () => {
-  it("every palace-room-content-reading file in packages/core/src either calls the shared choke, or is allowlisted with a real reason", () => {
-    const discovered = scanForUnchokedPalaceRoomReaders(CORE_SRC);
-    assert.ok(discovered.length > 0, "sanity: the scanner must find at least the known choke-calling files (journal-search.ts, session-start.ts, palace/consolidate.ts, ...) — zero results means the pattern itself is broken");
+describe("identity-trust completeness — palace-room shape (function-scope rebuild, 2026-08-30)", () => {
+  it("every palace-room-shape UNIT in packages/core/src either calls the shared choke (directly, or via a LIVE-verified trusted wrapper), or is allowlisted with a real reason", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanForUnchokedPalaceRoomReaders(CORE_SRC, effectiveWrappers);
+    assert.ok(discovered.length > 0, "sanity: the scanner must find at least the known choke-calling units — zero results means the pattern itself is broken");
 
     const unclassified = [];
-    for (const { file, hasChoke } of discovered) {
+    for (const { file, unit, hasChoke } of discovered) {
       if (hasChoke) continue;
-      const reason = ALLOWLIST_PALACE[file];
-      if (!reason || reason.trim().length < MIN_PALACE_REASON_LENGTH) {
-        unclassified.push(file);
-      }
+      const key = `${file}::${unit}`;
+      const reason = ALLOWLIST_C[key];
+      if (!reason || reason.trim().length < MIN_PALACE_REASON_LENGTH) unclassified.push(key);
     }
     assert.deepEqual(
       unclassified,
       [],
-      `${unclassified.length} file(s) scan a palace-room directory and read file content, ` +
-      `but neither call the shared choke (isRescueSourcedContent/isRescueSourceTag) nor carry ` +
-      `an allowlist reason: ${unclassified.join(", ")}. Classify each in this test's ALLOWLIST_PALACE ` +
-      `(with a real, verified reason) or add the choke call before this can go green.`,
+      `${unclassified.length} palace-room-shape unit(s) are neither choked nor allowlisted: ${unclassified.join(", ")}. ` +
+      `Classify each in ALLOWLIST_C (with a real, verified reason) or route it through the shared choke.`,
     );
   });
 
-  it("every ALLOWLIST_PALACE entry still exists on disk and is still flagged by the scanner (stale entries are not silently ignored)", () => {
-    const discovered = scanForUnchokedPalaceRoomReaders(CORE_SRC);
-    const discoveredFiles = new Set(discovered.map((d) => d.file));
-    for (const file of Object.keys(ALLOWLIST_PALACE)) {
-      assert.ok(
-        fs.existsSync(path.join(CORE_SRC, file)),
-        `allowlist entry "${file}" does not exist on disk — remove the stale entry`,
-      );
-      assert.ok(
-        discoveredFiles.has(file),
-        `allowlist entry "${file}" is no longer flagged by the scanner (e.g. it stopped reading ` +
-        `palace-room content, or the risk pattern moved) — remove the stale entry so the allowlist ` +
-        `stays a true reflection of live risk, not accumulated cruft`,
-      );
+  it("every ALLOWLIST_C entry is still flagged by the scanner (stale entries are not silently ignored)", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanForUnchokedPalaceRoomReaders(CORE_SRC, effectiveWrappers);
+    const discoveredKeys = new Set(discovered.map((d) => `${d.file}::${d.unit}`));
+    for (const key of Object.keys(ALLOWLIST_C)) {
+      assert.ok(discoveredKeys.has(key), `allowlist entry "${key}" is no longer flagged by the scanner — remove the stale entry`);
     }
   });
 
-  // ── Non-vacuity proof ────────────────────────────────────────────────────
-  describe("non-vacuity: the palace-room scanner actually catches a new unchoked surface", () => {
+  describe("non-vacuity: the function-scope palace scanner catches a new unchoked FUNCTION even in an otherwise-safe file", () => {
     let fixtureRoot;
+    before(() => { fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-p0-trustclass-palace-fixture-")); });
+    after(() => { fs.rmSync(fixtureRoot, { recursive: true, force: true }); });
 
-    before(() => {
-      fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-identity-trust-completeness-palace-fixture-"));
-    });
-    after(() => {
-      fs.rmSync(fixtureRoot, { recursive: true, force: true });
-    });
-
-    it("RED: a synthetic new palace-room reader that scans palaceDir/listRooms + reads content, with NO choke call, is flagged", () => {
+    it("RED then GREEN: a synthetic new palace-room reader is flagged unchoked, then clears once it calls the choke", async () => {
       const fixtureFile = path.join(fixtureRoot, "tools-logic", "hypothetical-new-room-reader.ts");
       fs.mkdirSync(path.dirname(fixtureFile), { recursive: true });
       fs.writeFileSync(
@@ -550,29 +463,18 @@ describe("identity-trust completeness — palace-room shape (Wave 1, 2026-08-29)
           `    const roomPath = path.join(pd, "rooms", room.slug);`,
           `    for (const f of fs.readdirSync(roomPath)) {`,
           `      const content = fs.readFileSync(path.join(roomPath, f), "utf-8");`,
-          `      console.log(content); // returns raw room content to a caller — no rescue check`,
+          `      console.log(content);`,
           `    }`,
           `  }`,
           `}`,
         ].join("\n"),
         "utf-8",
       );
-
-      const discovered = scanForUnchokedPalaceRoomReaders(fixtureRoot);
-      const flagged = discovered.find((d) => d.file === path.join("tools-logic", "hypothetical-new-room-reader.ts"));
+      let discovered = await scanForUnchokedPalaceRoomReaders(fixtureRoot, []);
+      let flagged = discovered.find((d) => d.unit === "hypotheticalNewRoomReader");
       assert.ok(flagged, "the scanner must flag the synthetic unchoked palace-room reader");
-      assert.equal(flagged.hasChoke, false, "the synthetic surface has no choke call — hasChoke must be false");
+      assert.equal(flagged.hasChoke, false);
 
-      assert.throws(() => {
-        const unclassified = discovered.filter((d) => !d.hasChoke && !ALLOWLIST_PALACE[d.file]);
-        if (unclassified.length > 0) {
-          throw new Error(`unclassified: ${unclassified.map((d) => d.file).join(", ")}`);
-        }
-      }, /unclassified/, "a new palace-room surface with no choke call and no allowlist entry must fail the completeness check");
-    });
-
-    it("GREEN: the SAME synthetic surface stops being flagged once it calls the choke", () => {
-      const fixtureFile = path.join(fixtureRoot, "tools-logic", "hypothetical-new-room-reader-fixed.ts");
       fs.writeFileSync(
         fixtureFile,
         [
@@ -596,11 +498,207 @@ describe("identity-trust completeness — palace-room shape (Wave 1, 2026-08-29)
         ].join("\n"),
         "utf-8",
       );
-      const discovered = scanForUnchokedPalaceRoomReaders(fixtureRoot);
-      const flagged = discovered.find((d) => d.file === path.join("tools-logic", "hypothetical-new-room-reader-fixed.ts"));
-      assert.ok(flagged, "the scanner should still discover the file (it matches the risk pattern)");
+      discovered = await scanForUnchokedPalaceRoomReaders(fixtureRoot, []);
+      flagged = discovered.find((d) => d.unit === "hypotheticalNewRoomReader");
+      assert.ok(flagged, "the scanner should still discover the file (it still matches the risk pattern)");
       assert.equal(flagged.hasChoke, true, "once the choke call is present, hasChoke must flip to true");
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// PART D — sync/backfill raw-read closure (gap #5/#6's root).
+//
+// autoBackfill (session-start.ts) and the CLI's `ar setup supabase
+// --backfill` admin command (found independently while building this
+// harness — the SAME vulnerability class, a SECOND call site) bypass
+// RISK_PATTERN/PALACE_RISK_PATTERN ENTIRELY: neither calls journalDirs()/
+// archiveRawDir()/palaceDir()/listRooms() — both use projectSubPath()/a
+// hardcoded projectsDir plus raw path.join("journal")/path.join("palace",
+// "rooms") instead. Broadening either regex to catch this would require
+// matching on "constructs a path containing the literal string 'journal' or
+// 'palace'", which false-positives on huge swaths of unrelated code
+// (virtually every file in this package touches those literal strings
+// somewhere). Per this wave's brief ("OR rely on #5's structural closure —
+// autoBackfill routed through readTierCandidates — and assert that
+// instead"), this is a small, NAME-BASED, explicitly-scoped check: does the
+// function actually named autoBackfill/the CLI's backfill sub-action source
+// its content EXCLUSIVELY via the sanctioned readTierCandidates FETCH
+// stage, with no direct fs.readFileSync of its own.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("identity-trust completeness — sync/backfill raw-read closure (gap #5/#6, 2026-08-30)", () => {
+  it("autoBackfill (session-start.ts) sources journal+palace content exclusively via readTierCandidates, never a raw readFileSync of its own", async () => {
+    const file = path.join(CORE_SRC, "tools-logic", "session-start.ts");
+    const text = await extractTopLevelFunction(file, "autoBackfill");
+    assert.ok(text, "autoBackfill() not found in session-start.ts — has it been renamed? update this check");
+    assert.ok(/\breadTierCandidates\(|\bgatherProjectBackfillFiles\(/.test(text), "autoBackfill must route journal/palace-room reads through readTierCandidates (or its gatherProjectBackfillFiles wrapper) — the safe-by-default FETCH stage — otherwise rescue-tagged content can reach ar_entries via backfill()");
+    assert.ok(!/\bfs\.readFileSync\(/.test(text), "autoBackfill must not call fs.readFileSync directly — all content must come from the already-loaded .content field of a trust-tagged candidate");
+  });
+
+  it("gatherProjectBackfillFiles (supabase/sync.ts) — the shared helper both autoBackfill and the CLI's backfill command call — sources content exclusively via readTierCandidates", async () => {
+    const file = path.join(CORE_SRC, "supabase", "sync.ts");
+    const text = await extractTopLevelFunction(file, "gatherProjectBackfillFiles");
+    assert.ok(text, "gatherProjectBackfillFiles() not found in supabase/sync.ts — has it been renamed/removed? update this check");
+    assert.ok(/\breadTierCandidates\(/.test(text), "gatherProjectBackfillFiles must route through readTierCandidates");
+    assert.ok(!/\bfs\.readFileSync\(/.test(text), "gatherProjectBackfillFiles must not call fs.readFileSync directly");
+  });
+
+  it("the CLI's `ar setup supabase --backfill` sub-action sources content exclusively via core.gatherProjectBackfillFiles, never its own raw readFileSync scan", async () => {
+    const { cases } = await extractSwitchCases(CLI_SRC, "command");
+    const setupCase = cases.find((c) => c.id === "setup");
+    assert.ok(setupCase, "\"setup\" case not found in the CLI's command switch — has the dispatch shape changed? update this check");
+    const subActions = extractSubActions(setupCase.text, "setup");
+    // extractSubActions' text-window heuristic keys sub-actions by a
+    // `sub === "literal"`/`case "literal":` marker; this admin path is
+    // gated by `rest.includes("--backfill")` (a flag check, not a `sub ===`
+    // dispatch), so it is not independently addressable via that mechanism.
+    // Fall back to the setup case's own full text (still narrower than a
+    // whole-file scan — this is the "setup supabase" command's body only).
+    const region = subActions.find((s) => s.id === "setup.supabase")?.text ?? setupCase.text;
+    assert.ok(/--backfill/.test(region), "sanity: the --backfill admin path must still exist in the setup case's text — has it moved? update this check");
+    assert.ok(/\bgatherProjectBackfillFiles\(/.test(region), "the CLI's --backfill admin command must route through core.gatherProjectBackfillFiles — a raw fs.readdirSync/readFileSync scan here is the SAME vulnerability class as gap #5, just a second call site (found independently while building this harness)");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// PART E — the includeUntrusted escape-hatch guard.
+//
+// readTierCandidates' `includeUntrusted: true` opt-in is a DELIBERATE,
+// documented escape hatch reserved for queryMemory()'s own mandatory
+// TRUST-FILTER pipeline stage, which re-applies filterTrusted itself
+// immediately after. Every OTHER call site setting this flag reopens the
+// exact rescue-injection hole readTierCandidates' safe-by-default posture
+// exists to close. Scanned across ALL FOUR packages (not just core) —
+// this is a workspace-wide contract, and a violation could just as easily
+// land in the CLI, MCP server, or SDK as in core.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("identity-trust completeness — includeUntrusted escape-hatch guard (2026-08-30)", () => {
+  it("`includeUntrusted: true` appears, as EXECUTABLE code, ONLY in retrieval/query-memory.ts, workspace-wide", () => {
+    const packagesRoot = path.join(__dirname, "..", "..");
+    const pattern = /includeUntrusted\s*:\s*true\b/;
+    const violations = [];
+    for (const pkg of ["core", "mcp-server", "cli", "sdk"]) {
+      const srcRoot = path.join(packagesRoot, pkg, "src");
+      if (!fs.existsSync(srcRoot)) continue;
+      for (const full of walkTsFiles(srcRoot)) {
+        const rel = path.relative(packagesRoot, full);
+        if (rel === path.join("core", "src", "retrieval", "query-memory.ts")) continue; // the sanctioned sole call site
+        const cleaned = stripComments(fs.readFileSync(full, "utf-8"));
+        if (pattern.test(cleaned)) violations.push(rel);
+      }
+    }
+    assert.deepEqual(
+      violations,
+      [],
+      `"includeUntrusted: true" appears as EXECUTABLE code outside retrieval/query-memory.ts in: ${violations.join(", ")}. ` +
+      `This is the sanctioned escape hatch for queryMemory()'s own mandatory trust-filter stage ONLY — every other ` +
+      `call site reopens the rescue-injection hole readTierCandidates' safe-by-default posture exists to close.`,
+    );
+  });
+
+  it("non-vacuity: a fixture file with the literal executable pattern outside query-memory.ts is flagged", () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-p0-trustclass-escapehatch-fixture-"));
+    try {
+      const fixtureFile = path.join(fixtureRoot, "some-other-file.ts");
+      fs.writeFileSync(
+        fixtureFile,
+        `import { readTierCandidates } from "./candidates.js";\n` +
+        `export function leaky(project) {\n` +
+        `  return readTierCandidates("journal", project, { includeUntrusted: true });\n` +
+        `}\n`,
+        "utf-8",
+      );
+      const pattern = /includeUntrusted\s*:\s*true\b/;
+      const cleaned = stripComments(fs.readFileSync(fixtureFile, "utf-8"));
+      assert.ok(pattern.test(cleaned), "sanity: the fixture must actually match the pattern");
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// PART F — multi-region residual check.
+//
+// Three functions mix an ALREADY-safe region with a STILL-unsafe one in the
+// SAME body — function-scope granularity alone cannot separate them,
+// because ANY choke/wrapper call ANYWHERE in the function masks its unsafe
+// sibling region (verified empirically for all three while building this
+// harness — see this file's header). AST IfStatement boundaries (not
+// brace-counting or text-window heuristics) split each into named regions;
+// each region is independently asserted. This is a small, explicit,
+// hand-enumerated list — not a generalized "find every branch in every
+// function" mechanism (see test/lib/function-scope.mjs's own header for why
+// that generalization is a documented follow-up, not attempted here).
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("identity-trust completeness — multi-region residual check (2026-08-30)", () => {
+  it("journalRead (journal-read.ts): BOTH the `latest` branch and the `date` branch (residual) are independently choked", async () => {
+    const file = path.join(CORE_SRC, "tools-logic", "journal-read.ts");
+    const result = await extractFunctionIfBranches(file, "journalRead", [
+      { label: "latest", conditionPattern: /targetDate\s*===\s*"latest"/ },
+    ]);
+    assert.ok(result, "journalRead() not found — has it been renamed? update this check");
+    const latest = result.regions.find((r) => r.label === "latest");
+    assert.ok(latest?.text, "the `targetDate === \"latest\"` branch not found — has journalRead's structure changed? update this check");
+    assert.ok(
+      /\breadTierCandidates\(/.test(latest.text) || CHOKE_PATTERN.test(latest.text),
+      `journalRead's "latest" branch must route through readTierCandidates (or call the choke directly) — a hand-rolled listJournalFiles+readFileSync scan here is gap #1's latest-branch. Region text:\n${latest.text}`,
+    );
+    assert.ok(
+      /\breadJournalFile\(/.test(result.residual) || CHOKE_PATTERN.test(result.residual),
+      `journalRead's residual (the "date" branch) must call readJournalFile (now safe-by-default) or the choke directly — this is gap #1's date-branch. Residual text:\n${result.residual}`,
+    );
+  });
+
+  it("journalSearch (journal-search.ts): BOTH the main journal loop (residual) and the include_palace branch are independently choked", async () => {
+    const file = path.join(CORE_SRC, "tools-logic", "journal-search.ts");
+    const result = await extractFunctionIfBranches(file, "journalSearch", [
+      { label: "include_palace", conditionPattern: /include_palace/ },
+    ]);
+    assert.ok(result, "journalSearch() not found — has it been renamed? update this check");
+    const palace = result.regions.find((r) => r.label === "include_palace");
+    assert.ok(palace?.text, "the `input.include_palace` branch not found — has journalSearch's structure changed? update this check");
+    assert.ok(
+      /\breadTierCandidates\(/.test(palace.text) || CHOKE_PATTERN.test(palace.text),
+      `journalSearch's include_palace branch must route through readTierCandidates (or call the choke directly) — a hand-rolled listRooms+readFileSync scan here is gap #4. Region text:\n${palace.text}`,
+    );
+    assert.ok(
+      CHOKE_PATTERN.test(result.residual),
+      `journalSearch's residual (the main journal loop) must call the choke directly — this was ALREADY safe pre-fix and must stay so. Residual text:\n${result.residual}`,
+    );
+  });
+
+  it("fetchVerbatim (drill-down.ts): the journal branch is choked; the archive + palace regions are allowlisted SAFE by structural argument, not by a choke call", async () => {
+    const file = path.join(CORE_SRC, "tools-logic", "drill-down.ts");
+    const result = await extractFunctionIfBranches(file, "fetchVerbatim", [
+      { label: "journal", conditionPattern: /key\.kind\s*===\s*"journal"/ },
+      { label: "archive", conditionPattern: /key\.kind\s*===\s*"archive"/ },
+    ]);
+    assert.ok(result, "fetchVerbatim() not found — has it been renamed? update this check");
+    const journal = result.regions.find((r) => r.label === "journal");
+    const archive = result.regions.find((r) => r.label === "archive");
+    assert.ok(journal?.text, "the `key.kind === \"journal\"` branch not found — has fetchVerbatim's structure changed? update this check");
+    assert.ok(archive?.text, "the `key.kind === \"archive\"` branch not found — has fetchVerbatim's structure changed? update this check");
+    assert.ok(
+      /\breadJournalFile\(/.test(journal.text) || CHOKE_PATTERN.test(journal.text),
+      `fetchVerbatim's journal branch must call readJournalFile (now safe-by-default) or the choke directly — this is gap #2. Region text:\n${journal.text}`,
+    );
+    // Archive + palace (residual) regions are DELIBERATELY not choked —
+    // verified SAFE by structural argument (archive: distillOneSession never
+    // writes to archiveRawDir(); palace: a caller-specified single file, not
+    // a room glob) — see this wave's PR report. Assert the ABSENCE of a raw
+    // choke-free readFileSync is not the bar here; the bar is that this
+    // reasoning was actually re-verified, which the PR report + this comment
+    // constitute. No code assertion beyond "these regions still exist and
+    // still read via archiveRawDir()/palaceDir()" — a structural-safety
+    // argument cannot be mechanically checked without re-deriving the same
+    // provenance analysis the human/LLM review already did (see
+    // fence-completeness.test.mjs's own header comment on why content-
+    // provenance judgment calls are out of scope for mechanical enforcement).
+    assert.ok(/archiveRawDir\(/.test(archive.text), "sanity: the archive branch must still read via archiveRawDir() — if this moved, the SAFE argument needs re-verification");
   });
 });
 
@@ -747,5 +845,138 @@ describe("destination-proof — a hijacked rescue card cannot outrank/impersonat
     } else if (lite.continuity) {
       assert.ok(lite.continuity.includes("palace room salience"), `sessionStartLite: expected the genuine (trusted) entry to win the single line; got "${lite.continuity}"`);
     }
+  });
+
+  // ── NEW destination-proofs (P0 trust-class closure, 2026-08-30) ─────────
+  // One per surface this wave routed through the shared FETCH stage. Same
+  // fixture shape as the primary test above (a rescue-tagged card planted
+  // directly, bypassing the rescue sweep's own scrub — the sharpest form:
+  // a raw journal file whose ONLY distinguishing signal is the frontmatter
+  // `source: working-memory-rescue` tag) rather than re-running the whole
+  // WM-orphan-rescue mechanism, since these tests are about the READ side,
+  // not the rescue-write side Part A above already covers.
+
+  function writeRescueTaggedCard(slug, sid, title) {
+    const dir = path.join(TEST_ROOT, "projects", slug, "journal");
+    fs.mkdirSync(dir, { recursive: true });
+    const date = new Date().toISOString().slice(0, 10);
+    const body = [
+      "---",
+      `sid: ${sid}`,
+      `date: ${date}`,
+      `slug: ${slug}`,
+      "source: working-memory-rescue",
+      "---",
+      "",
+      `# ${title}`,
+      "",
+      "## Blockers",
+      title,
+      "",
+      "## Next",
+      `- ${title}`,
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(dir, `${date}--card--${sid}.md`), body, "utf-8");
+    return date;
+  }
+
+  const GENUINE_TERM = "GENUINE_SIBLING_UNIQUE_TERM";
+  const HIJACK_TERM_2 = "SECOND_HIJACKED_UNIQUE_TERM";
+
+  it("journalRead's \"latest\" branch never returns a rescue-tagged card even when it is the newest file", async () => {
+    writeGenuineCard(REAL_SLUG, "gap1-genuine-001", GENUINE_TERM);
+    // Backdate the genuine card slightly so the rescue-tagged one below is
+    // unambiguously the newer mtime — reproducing "latest" picking the
+    // hijacked file if not for the trust filter.
+    const genuineDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "journal");
+    for (const f of fs.readdirSync(genuineDir)) {
+      const past = (Date.now() - 60_000) / 1000;
+      fs.utimesSync(path.join(genuineDir, f), past, past);
+    }
+    writeRescueTaggedCard(REAL_SLUG, "gap1-hijack-001", HIJACK_TERM_2);
+
+    const result = await core.journalRead({ project: REAL_SLUG, date: "latest" });
+    assert.ok(!result.content.includes(HIJACK_TERM_2), `journalRead("latest") must never surface rescue-tagged content; got: ${result.content}`);
+    assert.ok(result.content.includes(GENUINE_TERM), `journalRead("latest") must still surface the genuine sibling entry; got: ${result.content}`);
+  });
+
+  it("journalRead's date branch (readJournalFile) never returns a rescue-tagged card for that date, even when it is the ONLY file on that date", async () => {
+    const rescueDate = writeRescueTaggedCard(REAL_SLUG, "gap1b-hijack-001", "SOLO_HIJACK_ON_THIS_DATE");
+    const result = await core.journalRead({ project: REAL_SLUG, date: rescueDate });
+    assert.ok(!result.content.includes("SOLO_HIJACK_ON_THIS_DATE"), `journalRead(date) must never surface a rescue-tagged file; got: ${JSON.stringify(result)}`);
+    assert.ok(result.error, "journalRead(date) must report 'no entry found' rather than fabricate content when the only candidate is rescue-tagged");
+  });
+
+  it("journalList never surfaces a rescue-tagged card's title, but still lists genuine siblings", async () => {
+    writeGenuineCard(REAL_SLUG, "gap-jlist-genuine-001", GENUINE_TERM);
+    writeRescueTaggedCard(REAL_SLUG, "gap-jlist-hijack-001", HIJACK_TERM_2);
+    const result = await core.journalList({ project: REAL_SLUG, limit: 50 });
+    assert.ok(!result.entries.some((e) => e.title.includes(HIJACK_TERM_2)), `journalList must never surface a rescue-tagged title; got ${JSON.stringify(result.entries)}`);
+    assert.ok(result.entries.some((e) => e.title.includes(GENUINE_TERM)), `journalList must still surface the genuine sibling entry; got ${JSON.stringify(result.entries)}`);
+  });
+
+  it("gatherProjectBackfillFiles never includes a rescue-tagged journal or palace-room file, but still includes genuine siblings", async () => {
+    writeGenuineCard(REAL_SLUG, "gap5-genuine-001", GENUINE_TERM);
+    writeRescueTaggedCard(REAL_SLUG, "gap5-hijack-001", HIJACK_TERM_2);
+    // listRooms() only recognizes a room directory that carries a
+    // `_room.json` (readPalaceRoomCandidates delegates to listRooms) — use
+    // the real API (ensurePalaceInitialized creates the default rooms,
+    // including "decisions") rather than hand-rolling an unregistered
+    // directory that would be silently invisible to the reader.
+    core.ensurePalaceInitialized(REAL_SLUG);
+    const roomDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "decisions");
+    fs.writeFileSync(path.join(roomDir, "genuine-topic.md"), `# ${GENUINE_TERM}\n`, "utf-8");
+    fs.writeFileSync(path.join(roomDir, "hijacked-topic.md"), `---\nsource: working-memory-rescue\n---\n\n# ${HIJACK_TERM_2}\n`, "utf-8");
+
+    const files = core.gatherProjectBackfillFiles(REAL_SLUG);
+    assert.ok(!files.some((f) => f.content.includes(HIJACK_TERM_2)), `gatherProjectBackfillFiles must never include rescue-tagged content (journal or palace); got ${JSON.stringify(files.map((f) => f.path))}`);
+    assert.ok(files.some((f) => f.content.includes(GENUINE_TERM) && f.store === "journal"), "gatherProjectBackfillFiles must still include the genuine journal sibling");
+    assert.ok(files.some((f) => f.content.includes(GENUINE_TERM) && f.store === "palace"), "gatherProjectBackfillFiles must still include the genuine palace-room sibling");
+  });
+
+  function writeRescueTaggedRoomFile(slug, room, filename, title) {
+    core.ensurePalaceInitialized(slug);
+    const roomDir = path.join(TEST_ROOT, "projects", slug, "palace", "rooms", room);
+    fs.writeFileSync(path.join(roomDir, filename), `---\nsource: working-memory-rescue\n---\n\n# ${title}\n`, "utf-8");
+    return roomDir;
+  }
+
+  it("palaceWalk depth=\"all\" (readRoomContent) never surfaces a rescue-tagged room file's content, but still surfaces genuine siblings", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    const roomDir = writeRescueTaggedRoomFile(REAL_SLUG, "decisions", "hijacked-decision.md", HIJACK_TERM_2);
+    fs.writeFileSync(path.join(roomDir, "genuine-decision.md"), `# ${GENUINE_TERM}\n`, "utf-8");
+
+    const walk = await core.palaceWalk({ project: REAL_SLUG, depth: "all" });
+    assert.ok(!walk.content.includes(HIJACK_TERM_2), `palaceWalk(depth="all") must never surface rescue-tagged room content; got: ${walk.content}`);
+    assert.ok(walk.content.includes(GENUINE_TERM), `palaceWalk(depth="all") must still surface the genuine sibling entry; got: ${walk.content}`);
+  });
+
+  it("palaceWalk depth=\"relevant\" (README direct read) never surfaces a rescue-tagged README, but still surfaces a genuine one", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    // "knowledge" is a default room whose name/description/tags contain
+    // "learning" — matches focus="learning-focus-term" below via its own
+    // description text, independent of the README content being tested.
+    const roomDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "knowledge");
+    fs.writeFileSync(path.join(roomDir, "README.md"), `---\nsource: working-memory-rescue\n---\n\n# ${HIJACK_TERM_2}\n`, "utf-8");
+
+    const walk = await core.palaceWalk({ project: REAL_SLUG, depth: "relevant", focus: "learning" });
+    assert.ok(!walk.content.includes(HIJACK_TERM_2), `palaceWalk(depth="relevant")'s README read must never surface rescue-tagged content; got: ${walk.content}`);
+  });
+
+  it("journalSearch's include_palace branch never surfaces a rescue-tagged room file, but still surfaces a genuine one", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    const roomDir = writeRescueTaggedRoomFile(REAL_SLUG, "decisions", "hijacked-decision.md", `${HIJACK_TERM_2} unique_search_marker`);
+    fs.writeFileSync(path.join(roomDir, "genuine-decision.md"), `# ${GENUINE_TERM} unique_search_marker\n`, "utf-8");
+
+    const search = await core.journalSearch({ query: "unique_search_marker", project: REAL_SLUG, include_palace: true });
+    assert.ok(!search.results.some((r) => r.excerpt.includes(HIJACK_TERM_2)), `journalSearch(include_palace) must never surface rescue-tagged content; got ${JSON.stringify(search.results)}`);
+    assert.ok(search.results.some((r) => r.excerpt.includes(GENUINE_TERM)), `journalSearch(include_palace) must still surface the genuine sibling entry; got ${JSON.stringify(search.results)}`);
+  });
+
+  it("fetchVerbatim's journal branch never returns a rescue-tagged card's content for a resurrect()-style verbatim fetch", async () => {
+    const rescueDate = writeRescueTaggedCard(REAL_SLUG, "gap2-hijack-001", "SOLO_VERBATIM_HIJACK");
+    const result = core.fetchVerbatim(REAL_SLUG, { kind: "journal", date: rescueDate });
+    assert.equal(result, null, `fetchVerbatim({kind:"journal"}) must return null for a rescue-tagged-only date, never fabricate a verbatim source; got ${JSON.stringify(result)}`);
   });
 });

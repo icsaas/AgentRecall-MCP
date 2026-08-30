@@ -15,10 +15,9 @@ import { readBehaviorPolicies } from "../storage/behavior-policies.js";
 import { readInsightsIndex } from "../palace/insights-index.js";
 import { readIdentity } from "../palace/identity.js";
 import { ensureDir } from "../storage/fs-utils.js";
-import { listJournalFiles } from "./journal-files.js";
-import { extractSection } from "./sections.js";
-import { journalDir, projectSubPath } from "../storage/paths.js";
+import { projectSubPath } from "../storage/paths.js";
 import { scrubForCloud, fenceMemory } from "../storage/content-guard.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 
 const HARD_BUDGET = 2200;
 
@@ -125,11 +124,17 @@ export function generateHandoff(slug: string): string {
   } catch { /* omit */ }
 
   // ── Active blockers (from latest journal "## Blockers" section) ───────────
+  // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass):
+  // was a raw fs.readFileSync of the latest journal file with ZERO rescue-tag
+  // check — for a file whose entire purpose is "paste this into a fresh
+  // agent" (see this file's own header comment), a hijacked card's
+  // fabricated "blockers"/"next steps" would be copied VERBATIM into every
+  // future session's handoff. Routed through readTierCandidates — already
+  // trust-tagged + safe-by-default (drops untrusted candidates).
   try {
-    const entries = listJournalFiles(slug);
-    if (entries.length > 0) {
-      const latest = entries[0];
-      const content = fs.readFileSync(path.join(latest.dir, latest.file), "utf-8");
+    const candidates = readTierCandidates("journal", slug);
+    if (candidates.length > 0) {
+      const content = candidates[0].content;
       // extractSection expects the SECTION_HEADERS map key; check if a
       // "## Blockers" heading is present by scanning directly (no SECTION_HEADERS key).
       const blockerIdx = content.indexOf("## Blockers");
@@ -168,11 +173,13 @@ export function generateHandoff(slug: string): string {
   } catch { /* omit */ }
 
   // ── Trajectory (## Next from newest journal) ──────────────────────────────
+  // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass):
+  // same fix as the Blockers section above — routed through
+  // readTierCandidates instead of a raw fs.readFileSync.
   try {
-    const entries = listJournalFiles(slug);
-    if (entries.length > 0) {
-      const latest = entries[0];
-      const content = fs.readFileSync(path.join(latest.dir, latest.file), "utf-8");
+    const candidates = readTierCandidates("journal", slug);
+    if (candidates.length > 0) {
+      const content = candidates[0].content;
       // Use extractSection for the "next" key if available; fall back to raw scan.
       let nextText: string | null = null;
       const nextIdx = content.indexOf("## Next");

@@ -3,6 +3,7 @@ import { getSupabaseClient } from "./client.js";
 import { createEmbeddingProvider, type EmbeddingProvider } from "./embedding.js";
 import type { SupabaseConfig } from "./config.js";
 import { calibratedConfidence, type ConfidenceScale } from "../tools-logic/confidence.js";
+import { isRescueSourceTag } from "../helpers/journal-filter.js";
 
 // Import the interface type — we can't import directly from recall-backend.ts
 // because it would create a circular dependency (it dynamically imports us).
@@ -94,19 +95,40 @@ export class SupabaseRecallBackend {
         .limit(limit),
     ]);
 
+    // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
+    // gap #6 defense-in-depth): the ROOT CAUSE (rescue-tagged content entering
+    // ar_entries via backfill/doSync) is closed at the write side by gap #5's
+    // fix (gatherProjectBackfillFiles routes through readTierCandidates), but
+    // this is the READ-side surfacing boundary, so it gets its own independent
+    // check rather than relying solely on the write side staying correct
+    // forever. IMPORTANT: the check is on `r.metadata?.source`, NOT
+    // `r.body` — doSync()'s own parseMemoryFile() SPLITS a file's frontmatter
+    // from its body before upload (`body = content.slice(endIdx + 3).trim()`),
+    // so `ar_entries.body` NEVER carries the `source:` frontmatter line by
+    // the time it reaches this query; a check on `isRescueSourcedContent(r.body)`
+    // would be silently vacuous (always false, since the tag is structurally
+    // absent from `body`). `metadata` is the field parseMemoryFile actually
+    // preserves the frontmatter into (`metadata.source`), and both the
+    // ar_semantic_search RPC and the FTS query below select it — see
+    // migration.sql's ar_semantic_search RETURNS TABLE definition.
+    const isRescueRow = (r: Record<string, unknown>): boolean =>
+      isRescueSourceTag((r.metadata as Record<string, unknown> | null | undefined)?.source);
+
     // Convert to RecallResultItem and rank per source
-    const semanticItems: RecallResultItem[] = (semanticResults.data ?? []).map(
-      (r: Record<string, unknown>) => ({
-        id: r.id as string,
-        source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
-        title: (r.title ?? r.slug) as string,
-        excerpt: ((r.body as string) ?? "").slice(0, 300),
-        score: (r.similarity as number) ?? 0,
-        // cosine similarity is already 0..1.
-        ...label((r.similarity as number) ?? 0, "cosine"),
-        room: (r.room as string) ?? undefined,
-      })
-    );
+    const semanticItems: RecallResultItem[] = (semanticResults.data ?? [])
+      .filter((r: Record<string, unknown>) => !isRescueRow(r))
+      .map(
+        (r: Record<string, unknown>) => ({
+          id: r.id as string,
+          source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
+          title: (r.title ?? r.slug) as string,
+          excerpt: ((r.body as string) ?? "").slice(0, 300),
+          score: (r.similarity as number) ?? 0,
+          // cosine similarity is already 0..1.
+          ...label((r.similarity as number) ?? 0, "cosine"),
+          room: (r.room as string) ?? undefined,
+        })
+      );
 
     const insightItemsList: RecallResultItem[] = (insightResults.data ?? []).map(
       (r: Record<string, unknown>) => ({
@@ -121,18 +143,20 @@ export class SupabaseRecallBackend {
       })
     );
 
-    const ftsItems: RecallResultItem[] = (ftsResults.data ?? []).map(
-      (r: Record<string, unknown>, idx: number) => ({
-        id: r.id as string,
-        source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
-        title: (r.title ?? r.slug) as string,
-        excerpt: ((r.body as string) ?? "").slice(0, 300),
-        score: 1 / (idx + 1),
-        // reciprocal-rank 1/(idx+1) is already 0..1.
-        ...label(1 / (idx + 1), "cosine"),
-        room: (r.room as string) ?? undefined,
-      })
-    );
+    const ftsItems: RecallResultItem[] = (ftsResults.data ?? [])
+      .filter((r: Record<string, unknown>) => !isRescueRow(r))
+      .map(
+        (r: Record<string, unknown>, idx: number) => ({
+          id: r.id as string,
+          source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
+          title: (r.title ?? r.slug) as string,
+          excerpt: ((r.body as string) ?? "").slice(0, 300),
+          score: 1 / (idx + 1),
+          // reciprocal-rank 1/(idx+1) is already 0..1.
+          ...label(1 / (idx + 1), "cosine"),
+          room: (r.room as string) ?? undefined,
+        })
+      );
 
     // RRF merge across all three
     semanticItems.sort((a, b) => b.score - a.score);

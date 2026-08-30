@@ -474,7 +474,7 @@ export { OpenAIEmbedding, VoyageEmbedding, zeroPad, createEmbeddingProvider } fr
 export type { EmbeddingProvider } from "./supabase/embedding.js";
 
 // Supabase — sync
-export { syncToSupabase, backfill, contentHash, parseMemoryFile, deriveSlug, logSyncError } from "./supabase/sync.js";
+export { syncToSupabase, backfill, gatherProjectBackfillFiles, contentHash, parseMemoryFile, deriveSlug, logSyncError } from "./supabase/sync.js";
 export type { ParsedMemoryFile } from "./supabase/sync.js";
 
 // RecallBackend

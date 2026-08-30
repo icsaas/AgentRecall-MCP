@@ -2902,43 +2902,15 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           let totalSynced = 0, totalSkipped = 0, totalFailed = 0;
 
           for (const slug of slugs) {
-            const slugDir = path.join(projectsDir, slug);
-            const files: Array<{ path: string; content: string; store: "journal" | "palace" | "awareness" | "digest"; room?: string }> = [];
-
-            // Journal files
-            const journalDir = path.join(slugDir, "journal");
-            if (fs.existsSync(journalDir)) {
-              for (const f of fs.readdirSync(journalDir).filter((f) => f.endsWith(".md"))) {
-                const fp = path.join(journalDir, f);
-                try {
-                  files.push({ path: fp, content: fs.readFileSync(fp, "utf-8"), store: "journal" });
-                } catch {
-                  totalFailed++;
-                }
-              }
-            }
-
-            // Palace room files
-            const roomsDir = path.join(slugDir, "palace", "rooms");
-            if (fs.existsSync(roomsDir)) {
-              for (const room of fs.readdirSync(roomsDir)) {
-                const roomPath = path.join(roomsDir, room);
-                try {
-                  if (!fs.statSync(roomPath).isDirectory()) continue;
-                } catch {
-                  totalFailed++;
-                  continue;
-                }
-                for (const f of fs.readdirSync(roomPath).filter((f) => f.endsWith(".md"))) {
-                  const fp = path.join(roomPath, f);
-                  try {
-                    files.push({ path: fp, content: fs.readFileSync(fp, "utf-8"), store: "palace", room });
-                  } catch {
-                    totalFailed++;
-                  }
-                }
-              }
-            }
+            // Identity-trust (P0 trust-class closure, 2026-08-30,
+            // wave/pipe-p0-trustclass): was a raw fs.readdirSync+readFileSync
+            // scan of BOTH the journal and palace/rooms directories with ZERO
+            // rescue-tag check — the SAME vulnerability class as gap #5
+            // (session-start.ts's autoBackfill), a second independent call
+            // site found while auditing that gap. core.gatherProjectBackfillFiles
+            // sources the same two directories exclusively via
+            // readTierCandidates (trust-tagged + safe-by-default).
+            const files = core.gatherProjectBackfillFiles(slug);
 
             if (files.length === 0) continue;
 
