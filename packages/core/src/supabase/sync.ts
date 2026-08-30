@@ -290,6 +290,24 @@ async function syncCorrectionRecord(
  * (recall-backend.ts's `search()` also gets an independent defense-in-depth
  * check on `metadata.source`, since `body` itself never carries the
  * frontmatter tag once parseMemoryFile strips it at write time).
+ *
+ * P0 independent-review FIX 4 (2026-08-30) — DISCLOSED, INTENTIONAL scope
+ * narrowing (assessed, not accidental): the journal side inherits
+ * `readTierCandidates("journal", ...)`'s own `listJournalFiles(project,
+ * false)` reader, which requires a leading `^\d{4}-\d{2}-\d{2}` filename
+ * match — this naturally EXCLUDES `journal/_index.md` (the machine-readable
+ * index artifact, not memory content; see `helpers/journal-filter.ts`'s
+ * `isJournalFile` doc comment for why an index file must never be treated
+ * as a journal entry anywhere in this codebase). The palace side inherits
+ * `listRooms()`'s own requirement that a room directory carry a
+ * `_room.json` file — this excludes an unregistered "remnant" room
+ * directory (`palace/rooms.ts`'s own `listRooms()` comment already names
+ * this exact case: "not real rooms, e.g. remnant 'unnamed/' dirs"). BOTH
+ * exclusions are correct for backfill's purpose (syncing genuine MEMORY
+ * CONTENT to Supabase, not index/orphan artifacts) and are the SAME
+ * narrowing every other consumer of these two readers already gets —
+ * verified here, not silently inherited, because backfill is the one
+ * surface whose OUTPUT leaves this machine.
  */
 export function gatherProjectBackfillFiles(
   project: string

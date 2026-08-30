@@ -18,7 +18,7 @@ function label(score: number, scale: ConfidenceScale): { confidence: string; cal
   return { confidence: c.label, calibrated: c.calibrated };
 }
 
-interface RecallResultItem {
+export interface RecallResultItem {
   id: string;
   // Structural duplicate of SmartRecallResultItem["source"] (see the file-header
   // comment on why this can't just import it). "archive" (F4, 2026-07-31) is
@@ -35,6 +35,81 @@ interface RecallResultItem {
   room?: string;
   date?: string;
   severity?: string;
+}
+
+/**
+ * True iff a raw Supabase row (ar_semantic_search RPC result or FTS query
+ * result — both `.select(...)` `metadata`) carries the rescue-quarantine
+ * provenance tag. IMPORTANT: the check is on `r.metadata?.source`, NOT
+ * `r.body` — `doSync()`'s own `parseMemoryFile()` SPLITS a file's
+ * frontmatter from its body before upload (`body = content.slice(endIdx + 3)
+ * .trim()`), so `ar_entries.body` NEVER carries the `source:` frontmatter
+ * line by the time it reaches this query; a check on
+ * `isRescueSourcedContent(r.body)` would be silently vacuous (always false,
+ * since the tag is structurally absent from `body`). `metadata` is the
+ * field `parseMemoryFile` actually preserves the frontmatter into
+ * (`metadata.source`), and both the `ar_semantic_search` RPC and the FTS
+ * query select it — see `migration.sql`'s `ar_semantic_search` `RETURNS
+ * TABLE` definition.
+ */
+function isRescueRow(r: Record<string, unknown>): boolean {
+  return isRescueSourceTag((r.metadata as Record<string, unknown> | null | undefined)?.source);
+}
+
+/**
+ * Pure row -> RecallResultItem mapper for pgvector-similarity rows
+ * (`ar_semantic_search` RPC results). Identity-trust filtered via
+ * `isRescueRow` (drops a rescue-tagged row before mapping — never
+ * surfaces it, at any rank).
+ *
+ * Extracted out of `SupabaseRecallBackend.search()` (P0 independent-review
+ * FIX 2, 2026-08-30) so this rescue-tag drop is destination-proof testable
+ * WITHOUT a live Supabase client + embedding provider — `search()` itself
+ * requires both, and this class has no dependency-injection seam for either
+ * (see recall-backend.test.mjs's own comment on why constructing a live
+ * `SupabaseRecallBackend` is out of scope for that test file). Behavior is
+ * IDENTICAL to the inline code this replaces — same filter, same field
+ * mapping — just callable directly with a hand-built row array.
+ */
+export function mapSemanticRows(rows: Array<Record<string, unknown>>): RecallResultItem[] {
+  return rows
+    .filter((r) => !isRescueRow(r))
+    .map(
+      (r) => ({
+        id: r.id as string,
+        source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
+        title: (r.title ?? r.slug) as string,
+        excerpt: ((r.body as string) ?? "").slice(0, 300),
+        score: (r.similarity as number) ?? 0,
+        // cosine similarity is already 0..1.
+        ...label((r.similarity as number) ?? 0, "cosine"),
+        room: (r.room as string) ?? undefined,
+      })
+    );
+}
+
+/**
+ * Pure row -> RecallResultItem mapper for PostgreSQL FTS rows (the FTS
+ * keyword-backup query's results). Same identity-trust filter as
+ * `mapSemanticRows` above — see that function's own doc comment for why
+ * this is extracted, and `isRescueRow`'s for why the check is on
+ * `metadata.source`, not `body`.
+ */
+export function mapFtsRows(rows: Array<Record<string, unknown>>): RecallResultItem[] {
+  return rows
+    .filter((r) => !isRescueRow(r))
+    .map(
+      (r, idx) => ({
+        id: r.id as string,
+        source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
+        title: (r.title ?? r.slug) as string,
+        excerpt: ((r.body as string) ?? "").slice(0, 300),
+        score: 1 / (idx + 1),
+        // reciprocal-rank 1/(idx+1) is already 0..1.
+        ...label(1 / (idx + 1), "cosine"),
+        room: (r.room as string) ?? undefined,
+      })
+    );
 }
 
 export class SupabaseRecallBackend {
@@ -101,34 +176,12 @@ export class SupabaseRecallBackend {
     // fix (gatherProjectBackfillFiles routes through readTierCandidates), but
     // this is the READ-side surfacing boundary, so it gets its own independent
     // check rather than relying solely on the write side staying correct
-    // forever. IMPORTANT: the check is on `r.metadata?.source`, NOT
-    // `r.body` — doSync()'s own parseMemoryFile() SPLITS a file's frontmatter
-    // from its body before upload (`body = content.slice(endIdx + 3).trim()`),
-    // so `ar_entries.body` NEVER carries the `source:` frontmatter line by
-    // the time it reaches this query; a check on `isRescueSourcedContent(r.body)`
-    // would be silently vacuous (always false, since the tag is structurally
-    // absent from `body`). `metadata` is the field parseMemoryFile actually
-    // preserves the frontmatter into (`metadata.source`), and both the
-    // ar_semantic_search RPC and the FTS query below select it — see
-    // migration.sql's ar_semantic_search RETURNS TABLE definition.
-    const isRescueRow = (r: Record<string, unknown>): boolean =>
-      isRescueSourceTag((r.metadata as Record<string, unknown> | null | undefined)?.source);
-
-    // Convert to RecallResultItem and rank per source
-    const semanticItems: RecallResultItem[] = (semanticResults.data ?? [])
-      .filter((r: Record<string, unknown>) => !isRescueRow(r))
-      .map(
-        (r: Record<string, unknown>) => ({
-          id: r.id as string,
-          source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
-          title: (r.title ?? r.slug) as string,
-          excerpt: ((r.body as string) ?? "").slice(0, 300),
-          score: (r.similarity as number) ?? 0,
-          // cosine similarity is already 0..1.
-          ...label((r.similarity as number) ?? 0, "cosine"),
-          room: (r.room as string) ?? undefined,
-        })
-      );
+    // forever. The actual filter+map logic lives in `mapSemanticRows`/
+    // `mapFtsRows` below (P0 independent-review FIX 2, 2026-08-30) — extracted
+    // out of this method so it is destination-proof testable with a
+    // hand-constructed row, without a live Supabase client + embedding
+    // provider (this class has no DI seam for either).
+    const semanticItems: RecallResultItem[] = mapSemanticRows(semanticResults.data ?? []);
 
     const insightItemsList: RecallResultItem[] = (insightResults.data ?? []).map(
       (r: Record<string, unknown>) => ({
@@ -143,20 +196,7 @@ export class SupabaseRecallBackend {
       })
     );
 
-    const ftsItems: RecallResultItem[] = (ftsResults.data ?? [])
-      .filter((r: Record<string, unknown>) => !isRescueRow(r))
-      .map(
-        (r: Record<string, unknown>, idx: number) => ({
-          id: r.id as string,
-          source: (r.store === "journal" ? "journal" : "palace") as "palace" | "journal",
-          title: (r.title ?? r.slug) as string,
-          excerpt: ((r.body as string) ?? "").slice(0, 300),
-          score: 1 / (idx + 1),
-          // reciprocal-rank 1/(idx+1) is already 0..1.
-          ...label(1 / (idx + 1), "cosine"),
-          room: (r.room as string) ?? undefined,
-        })
-      );
+    const ftsItems: RecallResultItem[] = mapFtsRows(ftsResults.data ?? []);
 
     // RRF merge across all three
     semanticItems.sort((a, b) => b.score - a.score);

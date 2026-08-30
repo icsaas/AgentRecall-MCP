@@ -2556,15 +2556,29 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
       } catch { /* non-blocking */ }
 
       // 4. Read room summaries
+      //
+      // Identity-trust (P0 independent-review FIX 3, 2026-08-30,
+      // wave/pipe-p0-trustclass): was a raw fs.readFileSync of each room's
+      // README.md with ZERO rescue-tag check, found while extending the
+      // completeness harness's auto-scanner to packages/cli/src (the same
+      // vulnerability class as gap #3/#11 — a hijacked room README's
+      // fabricated content, keyword-extracted here, would be written
+      // VERBATIM into this project's own Claude auto-memory file
+      // (ar_sync_<slug>.md/SYNC.md below) — an even higher-exposure
+      // destination than handoff.md, since it lands directly in another
+      // tool's own persistent memory store). Routed through
+      // readTierCandidates (trust-tagged + safe-by-default) instead of a
+      // raw readFileSync.
       let syncRooms: Array<{name: string; topKeywords: string[]}> = [];
       try {
         const roomList = core.listRooms(resolvedSync);
         for (const r of roomList.slice(0, 5)) {
           try {
-            const pd = core.palaceDir(resolvedSync);
-            const readmePath = path.join(pd, "rooms", r.slug, "README.md");
-            if (fs.existsSync(readmePath)) {
-              const content = fs.readFileSync(readmePath, "utf-8").slice(0, 300);
+            const readmeCandidate = core
+              .readTierCandidates("palace-room", resolvedSync, { room: r.slug })
+              .find((c) => c.file === "README.md");
+            if (readmeCandidate) {
+              const content = readmeCandidate.content.slice(0, 300);
               const kw = core.extractKeywords(content, 3);
               syncRooms.push({ name: r.name, topKeywords: kw });
             }
@@ -2940,6 +2954,17 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           }
 
           output(`\nBackfill complete — synced: ${totalSynced}, skipped: ${totalSkipped}, failed: ${totalFailed}`);
+          // P0 independent-review FIX 5 (2026-08-30): `failed` above counts
+          // Supabase-side sync errors only (backfill()'s own try/catch,
+          // per file). `core.gatherProjectBackfillFiles`'s underlying
+          // reader (retrieval/candidates.ts's `safeReadFile`) silently
+          // SKIPS a local file it cannot read (permission error, race with
+          // a concurrent delete, etc.) rather than throwing or signaling —
+          // that file never even reaches `files`, so its absence is not
+          // reflected in ANY of the three counters above. Documented here
+          // rather than plumbing a new failure-count field through the
+          // shared, widely-consumed candidate reader for this one caller.
+          output(`  (note: "failed" counts Supabase-side sync errors only — a local file this machine could not read is silently skipped upstream and is not counted here)`);
           break;
         }
 

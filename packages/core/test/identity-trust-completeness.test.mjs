@@ -562,6 +562,256 @@ describe("identity-trust completeness — sync/backfill raw-read closure (gap #5
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// PART G — cross-package extension: packages/mcp-server/src + packages/cli/src
+// (P0 independent-review FIX 3, 2026-08-30, wave/pipe-p0-trustclass).
+//
+// Parts B/C above only ever walked packages/core/src. Gaps #8/#9 (the CLI's
+// own recent-brief render and its independent --backfill scan, both closed
+// in this wave's first pass) were found by MANUAL audit, not the scanner —
+// the auto-discovery blind spot was real: the exact class-not-instance
+// disease this whole wave exists to cure, recurring one level UP (across
+// PACKAGES, not just across functions within one file).
+//
+// packages/mcp-server/src extends CLEANLY: extractTopLevelUnits' generic
+// function/method-scope extraction applies unchanged, no new allowlist entry
+// required — the one file matching the risk shape
+// (resources/journal-resources.ts's `register`) is already safe (its own
+// body literally calls the readJournalFile trusted wrapper for its "Journal
+// Entry" resource; its OTHER readFileSync, on journal/index.md, is a single
+// hardcoded metadata file, not a per-entry content glob).
+//
+// packages/cli/src does NOT extend cleanly via the SAME mechanism.
+// cli/src/index.ts's ENTIRE command dispatch lives inside ONE top-level
+// function (`main`, ~3000 lines) — extractTopLevelUnits necessarily returns
+// it as ONE unit, so ANY trusted-wrapper literal ANYWHERE in that one giant
+// function (e.g. the `readJournalFile(` call in its "sync-memory" case)
+// makes isChokedUnit return true for the WHOLE function — masking a
+// genuinely unchoked region elsewhere in the SAME function. This is EXACTLY
+// the whole-file-masking bug this harness rebuild exists to remove,
+// recurring one level UP at the whole-FUNCTION granularity for this one
+// file. PROVEN, not assumed, below (a fixture mimicking cli/src's actual
+// shape) — this is the honest, precise residual the brief asked for, not a
+// glossed-over gap.
+//
+// GRACEFUL DEGRADATION (per this wave's brief, explicitly sanctioned): a
+// fully general per-case (or deeper, per-branch) auto-scanner covering
+// EVERY case cli/src's dispatch might ever grow is a documented follow-up,
+// NOT attempted here. Instead: a NARROWER, CASE-SCOPED check, reusing
+// `extractSwitchCases` (the SAME mechanism Part D above already uses for
+// the "setup" case) — covering every "command" case whose OWN text matches
+// the risk shape, AS OF THIS WAVE. A brand-new case added to a FUTURE wave
+// that introduces a new raw journalDirs/listJournalFiles/palaceDir/
+// listRooms + readFileSync combination will NOT be auto-flagged by this
+// check (see the "residual, precise TODO" below) unless someone re-runs
+// this case enumeration and adds it — this is the tracked, honest limit.
+//
+// While extending this scan, it ALSO surfaced a genuinely new, previously-
+// unfixed instance of the SAME vulnerability class (not a fixture): the
+// "sync-memory" case's own room-summary reader did a raw fs.readFileSync of
+// each room's README.md, unchoked, to extract keywords written VERBATIM
+// into this project's own Claude auto-memory file
+// (ar_sync_<slug>.md/SYNC.md) — an even higher-exposure destination than
+// handoff.md. Fixed alongside this test (routed through readTierCandidates,
+// same as every other gap this wave closes); confirmed below that the
+// "sync-memory" case no longer matches the risk shape at all post-fix.
+// ─────────────────────────────────────────────────────────────────────────
+
+const MCP_SRC = path.join(__dirname, "..", "..", "mcp-server", "src");
+
+describe("identity-trust completeness — cross-package extension: packages/mcp-server/src (FIX 3, P0 review-fix, 2026-08-30)", () => {
+  it("every journal-shape UNIT in packages/mcp-server/src either calls the shared choke (directly, or via a LIVE-verified trusted wrapper), or is allowlisted", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanForUnchokedJournalReaders(MCP_SRC, effectiveWrappers);
+    assert.ok(discovered.length > 0, "sanity: the scanner must find at least one journal-risk-shaped unit in mcp-server/src (resources/journal-resources.ts) — zero results means the pattern (or MCP_SRC) is broken");
+    const unclassified = discovered.filter((d) => !d.hasChoke).map((d) => `${d.file}::${d.unit}`);
+    assert.deepEqual(unclassified, [], `${unclassified.length} mcp-server journal-shape unit(s) unchoked and unallowlisted: ${unclassified.join(", ")}. This package had zero allowlist entries as of this wave — if this fires, either fix the unit or add a truthfully-reasoned allowlist here.`);
+  });
+
+  it("every palace-room-shape UNIT in packages/mcp-server/src either calls the shared choke (directly, or via a LIVE-verified trusted wrapper), or is allowlisted", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanForUnchokedPalaceRoomReaders(MCP_SRC, effectiveWrappers);
+    const unclassified = discovered.filter((d) => !d.hasChoke).map((d) => `${d.file}::${d.unit}`);
+    assert.deepEqual(unclassified, [], `${unclassified.length} mcp-server palace-room-shape unit(s) unchoked and unallowlisted: ${unclassified.join(", ")}`);
+  });
+});
+
+describe("identity-trust completeness — cross-package extension: CLI dispatch cases (FIX 3, P0 review-fix, 2026-08-30)", () => {
+  /**
+   * CASE-SCOPED scan of cli/src/index.ts's `switch (command)` dispatch —
+   * narrower than, and a documented companion to, the generic
+   * extractTopLevelUnits mechanism above (see this describe block's parent
+   * header for why the generic mechanism alone is vacuous for this one
+   * file). Reuses `extractSwitchCases`, the SAME mechanism Part D already
+   * uses for the "setup" case.
+   */
+  async function scanCliCasesForRiskShape(effectiveWrappers) {
+    const { cases } = await extractSwitchCases(CLI_SRC, "command");
+    const results = [];
+    for (const c of cases) {
+      if (RISK_PATTERN.test(c.text) && READ_PATTERN.test(c.text)) {
+        results.push({ key: `cli::case:${c.id}[journal]`, hasChoke: isChokedUnit(c.text, effectiveWrappers) });
+      }
+      if (PALACE_RISK_PATTERN.test(c.text) && READ_PATTERN.test(c.text)) {
+        results.push({ key: `cli::case:${c.id}[palace]`, hasChoke: isChokedUnit(c.text, effectiveWrappers) });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * ALLOWLIST_CLI_CASES — same discipline as ALLOWLIST_B/ALLOWLIST_C: every
+   * case flagged by the scanner above that is not choked, with a reason
+   * verified by hand-reading THAT case's own text.
+   */
+  const ALLOWLIST_CLI_CASES = {
+    "cli::case:hook-end[journal]":
+      "SAFE — core.journalDir() here resolves the project's canonical journal DIRECTORY PATH only, " +
+      "to construct this hook's OWN today's capture-log-file path (`${today}-log.md`) plus an " +
+      "existence-only fs.existsSync/readdirSync check (`existingToday`) — no journal FILE CONTENT is " +
+      "read in this case. The readFileSync calls co-occurring in this case target unrelated internal " +
+      "lock/counter files (.hook-end-lock, the correction lock, feedback-log counters), never a " +
+      "journal entry.",
+    "cli::case:stats[palace]":
+      "SAFE — listRooms() usage here maps to `rooms.length` only (a count, never content); the " +
+      "readFileSync co-occurring in this case targets feedback-log.json, a completely unrelated file " +
+      "— false co-occurrence of two independent patterns in one case block (same class as " +
+      "tools-logic/session-end.ts::sessionEnd in ALLOWLIST_C).",
+    "cli::case:rooms[palace]":
+      "SAFE — reads each room's README.md purely to COUNT `### ` entry-header lines " +
+      "(`entryCount += entryMatches.length`) — the exact same count-only argument as " +
+      "palace/rooms.ts::countRoomEntries in ALLOWLIST_C. Never returns README content to the caller.",
+  };
+
+  it("every 'ar <command>' case whose OWN text matches the journal/palace-room risk shape either calls the shared choke or is allowlisted (case-scoped — cli/src's dispatch is one giant function, see this describe block's parent header)", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanCliCasesForRiskShape(effectiveWrappers);
+    assert.ok(discovered.length > 0, "sanity: at least one CLI case must match the risk shape today (hook-end/stats/rooms) — zero means the pattern or CLI_SRC path is broken");
+    const unclassified = discovered.filter((d) => !d.hasChoke && !ALLOWLIST_CLI_CASES[d.key]).map((d) => d.key);
+    assert.deepEqual(
+      unclassified,
+      [],
+      `${unclassified.length} CLI case(s) unchoked and unallowlisted: ${unclassified.join(", ")}. ` +
+      `Classify each in ALLOWLIST_CLI_CASES (with a real, verified reason) or route it through the shared choke.`,
+    );
+  });
+
+  it("every ALLOWLIST_CLI_CASES entry is still flagged (stale entries are not silently ignored)", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const discovered = await scanCliCasesForRiskShape(effectiveWrappers);
+    const discoveredKeys = new Set(discovered.map((d) => d.key));
+    for (const key of Object.keys(ALLOWLIST_CLI_CASES)) {
+      assert.ok(discoveredKeys.has(key), `allowlist entry "${key}" is no longer flagged by the scanner — remove the stale entry`);
+    }
+  });
+
+  it("sanity: the 'sync-memory' case no longer matches the risk shape at all — its raw README read was FIXED (routed through readTierCandidates), not merely allowlisted", async () => {
+    const { cases } = await extractSwitchCases(CLI_SRC, "command");
+    const syncMemoryCase = cases.find((c) => c.id === "sync-memory");
+    assert.ok(syncMemoryCase, "\"sync-memory\" case not found — has it been renamed? update this check");
+    assert.ok(
+      !(PALACE_RISK_PATTERN.test(syncMemoryCase.text) && READ_PATTERN.test(syncMemoryCase.text)),
+      "the sync-memory case must no longer match the palace-room risk shape — its README read must be readTierCandidates-based, not a raw palaceDir()+readFileSync scan",
+    );
+  });
+
+  it("non-vacuity: a NEW top-level file added to a cli/src-shaped directory (a raw-rescue reader in its OWN file, a sibling function calls the choke) IS caught by the same generic mechanism the mcp-server extension above uses", async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-p0-trustclass-cli-file-fixture-"));
+    try {
+      const fixtureFile = path.join(fixtureRoot, "utils", "new-cli-helper.ts");
+      fs.mkdirSync(path.dirname(fixtureFile), { recursive: true });
+      fs.writeFileSync(
+        fixtureFile,
+        [
+          `import * as fs from "node:fs";`,
+          `import { journalDirs } from "../storage/paths.js";`,
+          `import { isRescueSourcedContent } from "../helpers/journal-filter.js";`,
+          `export function safeCliReader(project) {`,
+          `  const dirs = journalDirs(project);`,
+          `  for (const dir of dirs) {`,
+          `    for (const f of fs.readdirSync(dir)) {`,
+          `      const content = fs.readFileSync(dir + "/" + f, "utf-8");`,
+          `      if (isRescueSourcedContent(content)) continue;`,
+          `      console.log(content);`,
+          `    }`,
+          `  }`,
+          `}`,
+          `export function unsafeCliReader(project) {`,
+          `  const dirs = journalDirs(project);`,
+          `  for (const dir of dirs) {`,
+          `    for (const f of fs.readdirSync(dir)) {`,
+          `      const content = fs.readFileSync(dir + "/" + f, "utf-8");`,
+          `      console.log(content); // no rescue check — must be flagged`,
+          `    }`,
+          `  }`,
+          `}`,
+        ].join("\n"),
+        "utf-8",
+      );
+      const discovered = await scanForUnchokedJournalReaders(fixtureRoot, []);
+      const safe = discovered.find((d) => d.unit === "safeCliReader");
+      const unsafe = discovered.find((d) => d.unit === "unsafeCliReader");
+      assert.ok(safe && unsafe, "both fixture functions must be discovered");
+      assert.equal(safe.hasChoke, true);
+      assert.equal(unsafe.hasChoke, false, "the generic per-FILE mechanism must still catch a new raw-rescue reader added as its own top-level FUNCTION in a NEW file under a cli/src-shaped tree");
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("HONEST RESIDUAL, proven: a new raw-rescue reader added as a NESTED region INSIDE an existing giant top-level function (mimicking cli/src/index.ts's real `main()` shape) is NOT caught by the generic per-function scanner — masked by a trusted-wrapper literal elsewhere in the SAME function. This is the documented gap the case-scoped check above narrows, not eliminates.", async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-p0-trustclass-cli-giant-fixture-"));
+    try {
+      const fixtureFile = path.join(fixtureRoot, "index.ts");
+      fs.writeFileSync(
+        fixtureFile,
+        [
+          `import * as fs from "node:fs";`,
+          `import { journalDirs } from "../storage/paths.js";`,
+          `import { readJournalFile } from "../helpers/journal-files.js";`,
+          `export async function main() {`,
+          `  const command = process.argv[2];`,
+          `  switch (command) {`,
+          `    case "safe-case": {`,
+          `      const content = readJournalFile("proj", "2026-01-01"); // trusted wrapper — masks the WHOLE function below`,
+          `      console.log(content);`,
+          `      break;`,
+          `    }`,
+          `    case "new-unsafe-case": {`,
+          `      const dirs = journalDirs("proj");`,
+          `      for (const dir of dirs) {`,
+          `        for (const f of fs.readdirSync(dir)) {`,
+          `          const content = fs.readFileSync(dir + "/" + f, "utf-8"); // NO rescue check`,
+          `          console.log(content);`,
+          `        }`,
+          `      }`,
+          `      break;`,
+          `    }`,
+          `  }`,
+          `}`,
+        ].join("\n"),
+        "utf-8",
+      );
+      const discovered = await scanForUnchokedJournalReaders(fixtureRoot, ["readJournalFile"]);
+      const mainUnit = discovered.find((d) => d.unit === "main");
+      assert.ok(mainUnit, "sanity: main() must be discovered as ONE unit (both cases are inside it)");
+      assert.equal(
+        mainUnit.hasChoke,
+        true,
+        "PROVEN RESIDUAL: main()'s single-unit granularity shows hasChoke=true for the WHOLE function " +
+        "(masked by the 'safe-case' trusted-wrapper call), even though 'new-unsafe-case' right below it " +
+        "has zero choke of its own — the generic per-function scanner alone cannot see this; this is " +
+        "exactly why this describe block's CASE-SCOPED check (extractSwitchCases) exists as a " +
+        "documented, narrower companion, not a full replacement. A future case added DIRECTLY inside " +
+        "cli/src/index.ts's real main() would need to be added to this test file's own case enumeration " +
+        "to be covered — it is NOT automatically discovered.",
+      );
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // PART E — the includeUntrusted escape-hatch guard.
 //
 // readTierCandidates' `includeUntrusted: true` opt-in is a DELIBERATE,
@@ -914,6 +1164,86 @@ describe("destination-proof — a hijacked rescue card cannot outrank/impersonat
     const result = await core.journalList({ project: REAL_SLUG, limit: 50 });
     assert.ok(!result.entries.some((e) => e.title.includes(HIJACK_TERM_2)), `journalList must never surface a rescue-tagged title; got ${JSON.stringify(result.entries)}`);
     assert.ok(result.entries.some((e) => e.title.includes(GENUINE_TERM)), `journalList must still surface the genuine sibling entry; got ${JSON.stringify(result.entries)}`);
+  });
+
+  // ── P0 independent-review FIX 1 (2026-08-30) ────────────────────────────
+  // journal-list.ts's ORIGINAL fix (above test) routed through
+  // readTierCandidates, which DROPS a rescue-tagged row entirely — hiding
+  // the entry's EXISTENCE at its real date for no security reason (the
+  // date is filename-derived at rescue-write time, system-clock-set, never
+  // attacker-influenced — only title/momentum, parsed from raw body, are
+  // the actual injection vector), AND (because `limit` was applied AFTER
+  // the drop) silently backfilling the `limit`-bounded window from further
+  // back in time with no signal to the caller. These two tests prove BOTH
+  // are fixed: existence+date is preserved with a quarantine placeholder,
+  // and the limit window is computed over the FULL set (quarantined rows
+  // included, in their real chronological position) — no silent backfill.
+  function writeCardOnDate(slug, sid, date, title, source) {
+    const dir = path.join(TEST_ROOT, "projects", slug, "journal");
+    fs.mkdirSync(dir, { recursive: true });
+    const body = [
+      "---",
+      `sid: ${sid}`,
+      `date: ${date}`,
+      `slug: ${slug}`,
+      `source: ${source}`,
+      "---",
+      "",
+      `# ${title}`,
+      "",
+      "## Brief",
+      title,
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(dir, `${date}--card--${sid}.md`), body, "utf-8");
+    return date;
+  }
+
+  function daysAgo(n) {
+    return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+
+  it("journalList shows a quarantined entry's EXISTENCE (real date, placeholder title) rather than dropping the row — never a fabricated title/momentum", async () => {
+    const d0 = daysAgo(0);
+    const d2 = daysAgo(2);
+    writeCardOnDate(REAL_SLUG, "fix1-genuine-d0", d0, GENUINE_TERM, "hook-end");
+    writeCardOnDate(REAL_SLUG, "fix1-hijack-d2", d2, HIJACK_TERM_2, "working-memory-rescue");
+
+    const result = await core.journalList({ project: REAL_SLUG, limit: 50 });
+    const quarantined = result.entries.find((e) => e.date === d2);
+    assert.ok(quarantined, `the quarantined entry's row must still exist (at its real date ${d2}), not be dropped; got ${JSON.stringify(result.entries)}`);
+    assert.equal(quarantined.title, core.QUARANTINE_TITLE, `the quarantined row's title must be the placeholder, never the rescue card's real (attacker-influenced) title; got ${JSON.stringify(quarantined)}`);
+    assert.equal(quarantined.momentum, "", "the quarantined row's momentum must be empty, never derived from the rescue card's raw body");
+    assert.ok(!JSON.stringify(quarantined).includes(HIJACK_TERM_2), `the quarantined row must never leak the rescue card's real title/body text; got ${JSON.stringify(quarantined)}`);
+
+    const genuine = result.entries.find((e) => e.date === d0);
+    assert.ok(genuine && genuine.title.includes(GENUINE_TERM), `the genuine sibling entry must still surface its real title; got ${JSON.stringify(result.entries)}`);
+  });
+
+  it("journalList's `limit` window is computed over the FULL set (quarantined rows included, in position) — no silent backfill from further back in time", async () => {
+    // 5 distinct dates, most-recent-first: d0 (genuine), d1 (genuine),
+    // d2 (QUARANTINED), d3 (genuine), d4 (genuine). limit=3 must return
+    // exactly {d0, d1, d2} — the 3 MOST RECENT dates, with d2 rendered as
+    // a quarantine placeholder — never {d0, d1, d3} (which is what the
+    // pre-fix "drop, then slice" order would have produced: d2 dropped
+    // before slicing, silently backfilling d3 into the 3rd slot).
+    const dates = [0, 1, 2, 3, 4].map(daysAgo);
+    const [d0, d1, d2, d3, d4] = dates;
+    writeCardOnDate(REAL_SLUG, "fix1-limit-d0", d0, `${GENUINE_TERM}_D0`, "hook-end");
+    writeCardOnDate(REAL_SLUG, "fix1-limit-d1", d1, `${GENUINE_TERM}_D1`, "hook-end");
+    writeCardOnDate(REAL_SLUG, "fix1-limit-d2", d2, HIJACK_TERM_2, "working-memory-rescue");
+    writeCardOnDate(REAL_SLUG, "fix1-limit-d3", d3, `${GENUINE_TERM}_D3`, "hook-end");
+    writeCardOnDate(REAL_SLUG, "fix1-limit-d4", d4, `${GENUINE_TERM}_D4`, "hook-end");
+
+    const result = await core.journalList({ project: REAL_SLUG, limit: 3 });
+    const gotDates = result.entries.map((e) => e.date);
+    assert.deepEqual(
+      gotDates,
+      [d0, d1, d2],
+      `limit=3 must return the 3 MOST RECENT dates (${d0}, ${d1}, ${d2}), the quarantined row INCLUDED in position — never silently backfilling an older date (e.g. ${d3}) past it; got ${JSON.stringify(gotDates)}`,
+    );
+    assert.equal(result.entries[2].title, core.QUARANTINE_TITLE, "the 3rd (oldest-in-window) slot must be the quarantine placeholder for d2, not a backfilled older genuine entry");
+    assert.ok(!gotDates.includes(d3) && !gotDates.includes(d4), "d3/d4 (outside the 3-most-recent window) must NOT appear — confirms this is a real window, not just 'everything'");
   });
 
   it("gatherProjectBackfillFiles never includes a rescue-tagged journal or palace-room file, but still includes genuine siblings", async () => {
