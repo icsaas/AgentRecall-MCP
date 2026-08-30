@@ -27,7 +27,7 @@ import { wmList, wmRead, guessSlugFromWmLines, WM_LIVE_WINDOW_MS, rescueOrphaned
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { readSupabaseConfig } from "../supabase/config.js";
-import { backfill } from "../supabase/sync.js";
+import { backfill, gatherProjectBackfillFiles } from "../supabase/sync.js";
 import { listMilestones } from "../palace/pipeline.js";
 import { getDreamHealth, type DreamHealth } from "../storage/dream-health.js";
 import { readBehaviorPolicies, recordPolicyLoad, type BehaviorRule } from "../storage/behavior-policies.js";
@@ -1188,30 +1188,15 @@ async function autoBackfill(project: string): Promise<void> {
     const projectDir = projectSubPath(project);
     if (!fs.existsSync(projectDir)) return;
 
-    const files: Array<{ path: string; content: string; store: "journal" | "palace" | "awareness" | "digest"; room?: string }> = [];
-
-    // Scan journal
-    const jDir = path.join(projectDir, "journal");
-    if (fs.existsSync(jDir)) {
-      for (const f of fs.readdirSync(jDir).filter((f) => f.endsWith(".md"))) {
-        const fp = path.join(jDir, f);
-        files.push({ path: fp, content: fs.readFileSync(fp, "utf-8"), store: "journal" });
-      }
-    }
-
-    // Scan palace rooms
-    const roomsDir = path.join(projectDir, "palace", "rooms");
-    if (fs.existsSync(roomsDir)) {
-      for (const room of fs.readdirSync(roomsDir)) {
-        const roomPath = path.join(roomsDir, room);
-        if (!fs.statSync(roomPath).isDirectory()) continue;
-        for (const f of fs.readdirSync(roomPath).filter((f) => f.endsWith(".md"))) {
-          const fp = path.join(roomPath, f);
-          files.push({ path: fp, content: fs.readFileSync(fp, "utf-8"), store: "palace", room });
-        }
-      }
-    }
-
+    // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
+    // gap #5): was a raw fs.readdirSync+readFileSync scan of BOTH the
+    // journal and palace/rooms directories with ZERO rescue-tag check,
+    // feeding straight into backfill() -> Supabase's ar_entries.body — the
+    // root cause behind gap #6 (recall-backend.ts surfacing that content
+    // with no way to represent "untrusted"). gatherProjectBackfillFiles
+    // (supabase/sync.ts) sources the SAME two directories exclusively via
+    // readTierCandidates, which is trust-tagged + safe-by-default.
+    const files = gatherProjectBackfillFiles(project);
     if (files.length > 0) {
       await backfill(project, files);
     }

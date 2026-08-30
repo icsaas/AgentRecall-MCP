@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { journalDir, journalDirs } from "../storage/paths.js";
 import { ensureDir } from "../storage/fs-utils.js";
-import { isJournalFile } from "./journal-filter.js";
+import { isJournalFile, isRescueSourcedContent } from "./journal-filter.js";
 import { parseJournalFileName } from "./journal-name-parser.js";
 import type { JournalEntry } from "../types.js";
 
@@ -162,12 +162,39 @@ export function readRecentCaptures(project: string, limit = 5): CaptureLogEntry[
   return entries;
 }
 
+/** Options for readJournalFile. */
+export interface ReadJournalFileOpts {
+  /**
+   * Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass):
+   * when false (default), any candidate file whose content carries the
+   * `source: working-memory-rescue` tag is skipped — this function is the
+   * SHARED choke point every generic content-reading caller (journalRead's
+   * date branch, drill-down.ts's fetchVerbatim journal branch, the MCP
+   * journal-resources.ts "Journal Entry" resource, the CLI's own recent-
+   * brief render) funnels through, mirroring readTierCandidates' own
+   * safe-by-default posture. Set true only when the caller has its own
+   * reason to see rescue-tagged content (no current caller does).
+   */
+  includeUntrusted?: boolean;
+}
+
 /**
  * Read a journal file. Checks primary dir first, then legacy.
+ *
+ * Safe by default (see ReadJournalFileOpts.includeUntrusted's own doc
+ * comment): a rescue-tagged candidate is skipped at EVERY shape below
+ * (exact/smart-named/session-scoped/capture-log), falling through to the
+ * next shape or directory rather than surfacing hijacked content. If ALL
+ * candidates for this date are rescue-tagged, this returns null — the same
+ * "nothing genuine found" contract as a missing file, never a fabricated
+ * substitute.
  */
-export function readJournalFile(project: string, date: string): string | null {
+export function readJournalFile(project: string, date: string, opts: ReadJournalFileOpts = {}): string | null {
   // Validate date format before use in path.join or string matching
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+
+  const includeUntrusted = opts.includeUntrusted ?? false;
+  const keep = (content: string): boolean => includeUntrusted || !isRescueSourcedContent(content);
 
   // Include archive for backlink resolution — archived entries must be reachable
   const dirs = journalDirs(project, true);
@@ -181,15 +208,21 @@ export function readJournalFile(project: string, date: string): string | null {
 
     // Exact legacy match: YYYY-MM-DD.md
     const exact = path.join(dir, `${date}.md`);
-    if (fs.existsSync(exact)) return fs.readFileSync(exact, "utf-8");
+    if (fs.existsSync(exact)) {
+      const content = fs.readFileSync(exact, "utf-8");
+      if (keep(content)) return content;
+      // rescue-tagged exact-date file — skip it, fall through to the other
+      // shapes below (still within this same directory) rather than a bare
+      // early return.
+    }
 
     // Smart-named files: YYYY-MM-DD--{saveType}--{lines}L--{slug}.md
     const smartFiles = files.filter(f =>
       f.startsWith(`${date}--`) && f.endsWith(".md") && !f.includes("--capture--")
     );
     if (smartFiles.length > 0) {
-      const parts = smartFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8"));
-      return parts.join("\n\n---\n\n");
+      const parts = smartFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8")).filter(keep);
+      if (parts.length > 0) return parts.join("\n\n---\n\n");
     }
 
     // Legacy session-scoped: YYYY-MM-DD-{sessionId}.md
@@ -198,8 +231,8 @@ export function readJournalFile(project: string, date: string): string | null {
       f.startsWith(date + "-") && /^[a-f0-9]{6}\.md$/.test(f.slice(date.length + 1))
     );
     if (sessionFiles.length > 0) {
-      const parts = sessionFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8"));
-      return parts.join("\n\n---\n\n");
+      const parts = sessionFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8")).filter(keep);
+      if (parts.length > 0) return parts.join("\n\n---\n\n");
     }
 
     // Capture/log files (both formats)
@@ -208,8 +241,8 @@ export function readJournalFile(project: string, date: string): string | null {
       (f.includes("-log.md") || f.includes("--capture--"))
     );
     if (captureFiles.length > 0) {
-      const parts = captureFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8"));
-      return parts.join("\n\n---\n\n");
+      const parts = captureFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8")).filter(keep);
+      if (parts.length > 0) return parts.join("\n\n---\n\n");
     }
   }
   return null;

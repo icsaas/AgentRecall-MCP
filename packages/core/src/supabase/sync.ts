@@ -9,6 +9,7 @@ import { classifyStore } from "../storage/classification.js";
 import { scrubForCloud } from "../storage/content-guard.js";
 import { exportCorrections } from "../tools-logic/export-corrections.js";
 import { getRoot } from "../types.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 
 // ---------------------------------------------------------------------------
 // Utilities (exported for testing)
@@ -271,6 +272,54 @@ async function syncCorrectionRecord(
   } catch (err) {
     logSyncError(`syncCorrectionRecord failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/**
+ * Gather a project's journal + palace-room files for backfill(), sourced
+ * EXCLUSIVELY through readTierCandidates (P0 trust-class closure,
+ * 2026-08-30, wave/pipe-p0-trustclass, gap #5/#6's root) — never a raw
+ * readFileSync scan. This is the SHARED implementation both autoBackfill
+ * (session-start.ts, run on every session_start) and the CLI's
+ * `ar setup supabase --backfill` admin command call, closing the class of
+ * gap (a hand-rolled directory scan bypassing the rescue-quarantine choke,
+ * previously duplicated independently in BOTH call sites, discovered while
+ * auditing gap #5) in ONE place — class-not-instance, not two parallel
+ * bolt-on fixes. readTierCandidates' safe-by-default posture means a
+ * rescue-tagged file is never included here, so it can never reach
+ * `ar_entries.body` via backfill()/doSync() — closing gap #6's root cause
+ * (recall-backend.ts's `search()` also gets an independent defense-in-depth
+ * check on `metadata.source`, since `body` itself never carries the
+ * frontmatter tag once parseMemoryFile strips it at write time).
+ *
+ * P0 independent-review FIX 4 (2026-08-30) — DISCLOSED, INTENTIONAL scope
+ * narrowing (assessed, not accidental): the journal side inherits
+ * `readTierCandidates("journal", ...)`'s own `listJournalFiles(project,
+ * false)` reader, which requires a leading `^\d{4}-\d{2}-\d{2}` filename
+ * match — this naturally EXCLUDES `journal/_index.md` (the machine-readable
+ * index artifact, not memory content; see `helpers/journal-filter.ts`'s
+ * `isJournalFile` doc comment for why an index file must never be treated
+ * as a journal entry anywhere in this codebase). The palace side inherits
+ * `listRooms()`'s own requirement that a room directory carry a
+ * `_room.json` file — this excludes an unregistered "remnant" room
+ * directory (`palace/rooms.ts`'s own `listRooms()` comment already names
+ * this exact case: "not real rooms, e.g. remnant 'unnamed/' dirs"). BOTH
+ * exclusions are correct for backfill's purpose (syncing genuine MEMORY
+ * CONTENT to Supabase, not index/orphan artifacts) and are the SAME
+ * narrowing every other consumer of these two readers already gets —
+ * verified here, not silently inherited, because backfill is the one
+ * surface whose OUTPUT leaves this machine.
+ */
+export function gatherProjectBackfillFiles(
+  project: string
+): Array<{ path: string; content: string; store: "journal" | "palace"; room?: string }> {
+  const files: Array<{ path: string; content: string; store: "journal" | "palace"; room?: string }> = [];
+  for (const c of readTierCandidates("journal", project)) {
+    files.push({ path: c.sourcePath, content: c.content, store: "journal" });
+  }
+  for (const c of readTierCandidates("palace-room", project)) {
+    files.push({ path: c.sourcePath, content: c.content, store: "palace", room: c.room });
+  }
+  return files;
 }
 
 export async function backfill(

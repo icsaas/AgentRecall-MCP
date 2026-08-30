@@ -259,6 +259,81 @@ export function filterTrusted(candidates: MemoryCandidate[]): MemoryCandidate[] 
   return candidates.filter((c) => c.untrusted !== true);
 }
 
+/**
+ * A quarantine-safe VIEW of a candidate: existence (date/file/sourcePath)
+ * plus a `trusted` flag, WITHOUT ever exposing `content` for a candidate
+ * whose `untrusted` flag is `true`.
+ *
+ * P0 independent-review fix (FIX 1, 2026-08-30, wave/pipe-p0-trustclass):
+ * `journal-list.ts::journalList` needed to show a rescue-tagged entry EXISTS
+ * (at its real, non-attacker-controlled date — see `listCandidateStubs`'s own
+ * caller for why the date field itself is safe to surface) while never
+ * surfacing its title/momentum (which ARE derived from raw body text, the
+ * actual injection vector). Dropping the row outright hides existence for no
+ * security reason and silently shifts a `limit`-bounded window's contents
+ * (see journal-list.ts's own header comment); showing the raw `content` for
+ * a quarantined row would reopen exactly the surfacing gap this file exists
+ * to close. This helper is the sanctioned middle ground.
+ *
+ * NOT a raw exposure: `content` is populated ONLY when `untrusted !== true`.
+ * It deliberately does NOT go through `readTierCandidates`'s own
+ * `includeUntrusted` opt-in (that flag is reserved, by a workspace-wide
+ * completeness-harness guard, for `retrieval/query-memory.ts`'s own
+ * mandatory trust-filter stage — see this file's `ReadTierCandidatesOpts.
+ * includeUntrusted` doc comment) — instead it calls the SAME underlying
+ * `TIER_READERS[tier]` reader `readTierCandidates` itself calls, and applies
+ * its OWN content-stripping decision immediately, inline, before returning.
+ */
+export interface CandidateStub {
+  /** See `MemoryCandidate.date`'s own doc comment for tier-dependent semantics. */
+  date: string;
+  file: string;
+  sourcePath: string;
+  /** `true` iff the underlying candidate's `untrusted` flag is NOT `true` (mirrors `filterTrusted`'s own predicate). */
+  trusted: boolean;
+  /**
+   * The candidate's raw content — present if and ONLY IF `trusted` is
+   * `true`. A quarantined (untrusted) row NEVER carries this field, by
+   * construction (see this interface's own header) — never merely "the
+   * caller shouldn't read it".
+   */
+  content?: string;
+}
+
+/**
+ * Read every candidate for one tier, reduced to the quarantine-safe
+ * `CandidateStub` shape: existence (date/file/sourcePath) is preserved for
+ * EVERY candidate, trusted or not, but `content` is stripped for any
+ * candidate whose `untrusted` flag is `true`. See `CandidateStub`'s own doc
+ * comment for the full rationale (FIX 1, P0 independent-review fix,
+ * 2026-08-30).
+ *
+ * Ordering is preserved from the underlying tier reader (the SAME ordering
+ * `readTierCandidates` itself would return for the same `tier`/`opts`) — a
+ * caller that needs a `limit`-bounded window must slice AFTER mapping this
+ * function's full output, never before, so a quarantined row's real
+ * position is never silently skipped past (see journal-list.ts's own
+ * header comment for the "silent backfill" bug this ordering guarantee
+ * closes).
+ */
+export function listCandidateStubs(
+  tier: MemoryTier,
+  project: string,
+  opts: ReadTierCandidatesOpts = {},
+): CandidateStub[] {
+  const candidates = TIER_READERS[tier](project, opts);
+  return candidates.map((c) => {
+    const trusted = c.untrusted !== true;
+    return {
+      date: c.date,
+      file: c.file,
+      sourcePath: c.sourcePath,
+      trusted,
+      content: trusted ? c.content : undefined,
+    };
+  });
+}
+
 function safeReadFile(p: string): string | null {
   try {
     return fs.readFileSync(p, "utf-8");

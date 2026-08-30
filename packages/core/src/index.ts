@@ -337,7 +337,7 @@ export type { HandoffResult } from "./helpers/handoff.js";
 export { journalRead, type JournalReadInput, type JournalReadResult } from "./tools-logic/journal-read.js";
 export { journalWrite, type JournalWriteInput, type JournalWriteResult } from "./tools-logic/journal-write.js";
 export { journalCapture, type JournalCaptureInput, type JournalCaptureResult } from "./tools-logic/journal-capture.js";
-export { journalList, type JournalListInput, type JournalListResult } from "./tools-logic/journal-list.js";
+export { journalList, QUARANTINE_TITLE, type JournalListInput, type JournalListResult } from "./tools-logic/journal-list.js";
 export { journalProjects, type JournalProjectsResult } from "./tools-logic/journal-projects.js";
 export { projectBoard, type ProjectBoardResult, type ProjectEntry, type ProjectStatus } from "./tools-logic/project-board.js";
 export { renderBoard, renderDreamBanner, fitToWidth, displayWidth, charDisplayWidth, type DreamStatus, type RenderBoardOptions } from "./display/board-render.js";
@@ -474,7 +474,7 @@ export { OpenAIEmbedding, VoyageEmbedding, zeroPad, createEmbeddingProvider } fr
 export type { EmbeddingProvider } from "./supabase/embedding.js";
 
 // Supabase — sync
-export { syncToSupabase, backfill, contentHash, parseMemoryFile, deriveSlug, logSyncError } from "./supabase/sync.js";
+export { syncToSupabase, backfill, gatherProjectBackfillFiles, contentHash, parseMemoryFile, deriveSlug, logSyncError } from "./supabase/sync.js";
 export type { ParsedMemoryFile } from "./supabase/sync.js";
 
 // RecallBackend
@@ -492,7 +492,8 @@ export { DisabledMemoryBackend, getMemoryBackend, resetMemoryBackend } from "./t
 export type { MemoryBackend, RetainResult } from "./tools-logic/memory-backend.js";
 
 // Supabase — recall backend
-export { SupabaseRecallBackend } from "./supabase/recall-backend.js";
+export { SupabaseRecallBackend, mapSemanticRows, mapFtsRows } from "./supabase/recall-backend.js";
+export type { RecallResultItem } from "./supabase/recall-backend.js";
 
 // Local vector backend (no-Supabase semantic recall)
 export { LocalVectorRecallBackend } from "./vector/local-vector-backend.js";
@@ -697,12 +698,13 @@ export type { WorkingMemoryLine, WorkingMemoryFileInfo } from "./storage/working
 // `includeUntrusted: true` (or any other pre-fetched MemoryCandidate[]) has
 // a public, correct way to filter — not a private implementation detail a
 // second surface would have to reinvent.
-export { readTierCandidates, filterTrusted } from "./retrieval/candidates.js";
+export { readTierCandidates, filterTrusted, listCandidateStubs } from "./retrieval/candidates.js";
 export type {
   MemoryCandidate,
   MemoryTier,
   CandidateSourceKind,
   ReadTierCandidatesOpts,
+  CandidateStub,
 } from "./retrieval/candidates.js";
 
 // Wave 2 retrieval pipeline (2026-08-30, reports/2026-08-29-pipe-w2-query-report.md,

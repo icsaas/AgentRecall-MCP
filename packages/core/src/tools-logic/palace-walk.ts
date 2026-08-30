@@ -1,27 +1,30 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { resolveProject } from "../storage/project.js";
-import { palaceDir } from "../storage/paths.js";
 import { ensurePalaceInitialized, listRooms, recordAccess } from "../palace/rooms.js";
 import { readIdentity } from "../palace/identity.js";
 import { readAwareness } from "../palace/awareness.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 import type { WalkDepth, RoomMeta } from "../types.js";
 
 export function roomSummary(meta: RoomMeta): string {
   return `- **${meta.name}** (salience: ${meta.salience}) — ${meta.description}`;
 }
 
+/**
+ * Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
+ * gap #3): was a raw fs.readdirSync+readFileSync glob over the room's `.md`
+ * files with zero rescue-tag check — a rescue-tagged file could be
+ * concatenated into `content` and surfaced verbatim. Rewritten to call
+ * readTierCandidates("palace-room", ...) — already trust-tagged +
+ * safe-by-default (drops untrusted candidates before returning) — and join
+ * the (already-loaded) `.content` fields, matching the original's
+ * alphabetical-by-filename order.
+ */
 export function readRoomContent(project: string, room: RoomMeta): string {
-  const pd = palaceDir(project);
-  const roomPath = path.join(pd, "rooms", room.slug);
-  if (!fs.existsSync(roomPath)) return "";
-
-  const files = fs.readdirSync(roomPath).filter((f) => f.endsWith(".md")).sort();
+  const candidates = readTierCandidates("palace-room", project, { room: room.slug });
+  candidates.sort((a, b) => a.file.localeCompare(b.file));
   let content = `### ${room.name}\n\n`;
-  for (const file of files) {
-    const filePath = path.join(roomPath, file);
-    const text = fs.readFileSync(filePath, "utf-8");
-    const truncated = text.length > 2000 ? text.slice(0, 2000) + "\n...(truncated)" : text;
+  for (const c of candidates) {
+    const truncated = c.content.length > 2000 ? c.content.slice(0, 2000) + "\n...(truncated)" : c.content;
     content += truncated + "\n\n";
   }
   return content;
@@ -95,10 +98,16 @@ export async function palaceWalk(input: PalaceWalkInput): Promise<PalaceWalkResu
       output += "## Relevant Rooms\n\n";
       for (const room of matchingRooms.slice(0, 5)) {
         output += roomSummary(room) + "\n";
-        const pd = palaceDir(slug);
-        const readmePath = path.join(pd, "rooms", room.slug, "README.md");
-        if (fs.existsSync(readmePath)) {
-          const readme = fs.readFileSync(readmePath, "utf-8").replace(/^---[\s\S]*?---\n*/, "").trim();
+        // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
+        // gap #3 bonus finding): was a raw fs.readFileSync of the room's
+        // README.md with zero rescue-tag check — a SEPARATE gap from
+        // readRoomContent below, in the SAME file, that a whole-file-scoped
+        // harness pass would have missed (see identity-trust-completeness.test.mjs's
+        // header for exactly this class of miss). Routed through the same
+        // trust-tagged reader.
+        const readmeCandidate = readTierCandidates("palace-room", slug, { room: room.slug }).find((c) => c.file === "README.md");
+        if (readmeCandidate) {
+          const readme = readmeCandidate.content.replace(/^---[\s\S]*?---\n*/, "").trim();
           output += "  " + readme.slice(0, 1000) + "\n";
         }
         recordAccess(slug, room.slug);

@@ -61,6 +61,11 @@ export function fetchVerbatim(project: string, key: VerbatimKey | undefined): Ve
   try {
     if (key.kind === "journal") {
       if (!key.date || !/^\d{4}-\d{2}-\d{2}$/.test(key.date)) return null;
+      // Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass,
+      // gap #2): readJournalFile now skips rescue-tagged content by default
+      // (safe-by-default, matching readTierCandidates), so a hijacked card
+      // can never be attached here as a "verbatim source" for a
+      // resurrect()/recall() result.
       const text = readJournalFile(project, key.date);
       if (!text) return null;
       return { found: true, source: `journal/${key.date}`, text: cap(text) };
