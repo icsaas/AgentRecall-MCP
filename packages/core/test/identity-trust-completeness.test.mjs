@@ -904,9 +904,20 @@ describe("identity-trust completeness — multi-region residual check (2026-08-3
       /\breadTierCandidates\(/.test(palace.text) || CHOKE_PATTERN.test(palace.text),
       `journalSearch's include_palace branch must route through readTierCandidates (or call the choke directly) — a hand-rolled listRooms+readFileSync scan here is gap #4. Region text:\n${palace.text}`,
     );
+    // Wave 3b (2026-08-30, reports/2026-08-30-pipe-w3b-migrate-report.md
+    // STEP 1) migrated the residual (the primary journal scan) onto
+    // queryMemory({tiers:["journal"]}) — its own fs scan + direct choke call
+    // are gone, replaced by queryMemory()'s journal-tier scorer, which is
+    // independently verified trust-filtered (retrieval-candidates.test.mjs
+    // + query-memory-pipeline.test.mjs's own destination-proofs). This is
+    // the SAME "route through a shared, independently-verified fetch stage
+    // instead of inlining the choke at every call site" pattern the
+    // `include_palace` branch's own assertion just above already accepts
+    // for `readTierCandidates(` — `queryMemory(` is the residual's
+    // equivalent for Wave 3b.
     assert.ok(
-      CHOKE_PATTERN.test(result.residual),
-      `journalSearch's residual (the main journal loop) must call the choke directly — this was ALREADY safe pre-fix and must stay so. Residual text:\n${result.residual}`,
+      /\bqueryMemory\(/.test(result.residual) || CHOKE_PATTERN.test(result.residual),
+      `journalSearch's residual (the main journal loop) must route through queryMemory() (Wave 3b — its journal tier is trust-filtered via readTierCandidates+filterTrusted, verified independently in query-memory-pipeline.test.mjs) or call the choke directly. Residual text:\n${result.residual}`,
     );
   });
 

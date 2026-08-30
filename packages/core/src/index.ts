@@ -710,8 +710,9 @@ export type {
 // Wave 2 retrieval pipeline (2026-08-30, reports/2026-08-29-pipe-w2-query-report.md,
 // plywood SOP ecbd4351) — queryMemory() as a MANDATORY pipeline (fetch ->
 // trust-filter -> tokenize+score -> scope -> rank/fuse -> fence). smart_recall
-// is migrated onto this this wave; journalSearch/palaceSearch/recallInsight/
-// resurrect/session_start remain on their own paths until Wave 3.
+// is migrated onto this this wave; journalSearch/recallInsight join it in
+// Wave 3b (2026-08-30, reports/2026-08-30-pipe-w3b-migrate-report.md);
+// palaceSearch/resurrect/session_start remain on their own paths.
 export { queryMemory, queryArchiveFallback } from "./retrieval/query-memory.js";
 export type {
   QueryMemoryTier,
@@ -720,3 +721,9 @@ export type {
   QueryMemoryInput,
   QueryMemoryResult,
 } from "./retrieval/query-memory.js";
+
+// Wave 3b SCOPE stage (2026-08-30) — exported so a caller (or test) can
+// apply the same per-candidate project-attribution filter directly to any
+// `{projects?: string[]}[]` array without going through queryMemory() or
+// recallInsight() — see retrieval/scope.ts's own doc comment.
+export { applyScope } from "./retrieval/scope.js";
