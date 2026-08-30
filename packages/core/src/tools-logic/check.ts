@@ -277,14 +277,34 @@ export async function check(input: CheckInput): Promise<CheckResult> {
       const hasActionSignal = /\b(don't|never|always|must|should|use|avoid|prefer|stop|skip|check|verify|wait|need)\b/i.test(w.pattern);
       if (words.length < 5 || !hasActionSignal) continue;
       try {
+        // W4 fix (2026-08-30, root-cause of the PROJECT_INSIGHT_BUDGET
+        // never-fired gap — session-start.ts's project-scoped insight slot,
+        // :439-474): this call previously omitted BOTH `project` (top-level)
+        // and `source_project` (per-insight) — `awarenessUpdate` derives
+        // `IndexedInsight.projects` from the TOP-LEVEL `project` field only
+        // (see awareness-update.ts's `addIndexedInsight` call: `projects:
+        // input.project ? [input.project] : undefined`), so every insight
+        // auto-promoted here got `projects: undefined` forever and could
+        // never match session-start.ts's `(i.projects ?? []).includes(slug)`
+        // filter. `source_project` separately stamps `Insight.source_project`
+        // in awareness.md's topInsights (palace/awareness.ts's `addInsight`,
+        // defaults to "_global" when omitted) — a different store, same
+        // missing-attribution bug. Matches the exact pattern already used at
+        // session-end.ts:650/653 and smart-remember.ts:226/229 (both pass
+        // `project: slug` top-level AND `source_project: slug` per-insight)
+        // — not an invented convention. `slug` is already resolved above
+        // (line 128). Additive/non-regressing: worst case is correctly
+        // attributing an insight that was previously mis-filed global.
         await awarenessUpdate({
           insights: [{
             title: `Human preference: ${w.pattern.slice(0, 60)}`,
             evidence: `Detected from ${w.frequency} corrections in alignment log`,
             applies_when: w.pattern.split(/[\s\-:()]+/).filter((word: string) => word.length > 3).slice(0, 5),
             source: `check auto-promote ${todayISO()}`,
+            source_project: slug,
             severity: "important",
           }],
+          project: slug,
         });
         autoPromoted++;
       } catch {

@@ -551,6 +551,66 @@ describe("identity-trust completeness — sync/backfill raw-read closure (gap #5
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// PART D-EXT — sessionStart()'s own "recent journal briefs" + "resume"
+// regions (W4, 2026-08-30, wave/pipe-w4-session).
+//
+// sessionStart() was CLEAN in the trust harness (never allowlisted — Part
+// A's destination-proof already exercises it end-to-end with a real
+// hijacked card and passes), but its 2 remaining raw-read regions (today/
+// yesterday brief accumulation; the "most recent journal file" resume
+// scan) had never been put through THIS harness's own multi-region audit —
+// they inline-derived their own trust decision (`isRescueSourcedContent`
+// called at the call site) rather than sourcing content through the shared
+// FETCH stage. Migrated onto `readTierCandidates("journal", slug)` this
+// wave; unlike autoBackfill (PART D above), sessionStart() is a single,
+// non-mixed region for this concern post-migration — the WHOLE function
+// now has zero raw fs.readFileSync/fs.readdirSync of its own for journal
+// content (verified below), so a PART-D-style whole-function check is the
+// right fit rather than PART F's AST branch-splitter (which exists
+// specifically for functions that mix a choked region with a genuinely
+// unchoked sibling region in the SAME body — sessionStart() no longer does,
+// for this concern).
+//
+// Per the workspace-wide `includeUntrusted: true` guard (PART E below):
+// sessionStart() must NOT set that flag — it relies on readTierCandidates'
+// own safe-by-default (trusted-only) output, not the query-memory.ts-only
+// escape hatch. Asserted here too so a future edit can't quietly reopen the
+// hole via that specific route while still nominally "calling
+// readTierCandidates".
+//
+// Uses stripComments() (unlike PART D's own checks above) because this
+// function's own migration comments literally discuss the old raw-read
+// shape by name (e.g. "the old \`fs.readdirSync(dir)...\` scan") — without
+// stripping, those comments would false-positive the same regex this test
+// uses to prove the EXECUTABLE code path is clean.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("identity-trust completeness — sessionStart's own recent-briefs/resume closure (W4, 2026-08-30)", () => {
+  it("sessionStart() sources journal content exclusively via readTierCandidates, never a raw readFileSync/readdirSync of its own, and never sets includeUntrusted:true", async () => {
+    const file = path.join(CORE_SRC, "tools-logic", "session-start.ts");
+    const rawText = await extractTopLevelFunction(file, "sessionStart");
+    assert.ok(rawText, "sessionStart() not found in session-start.ts — has it been renamed? update this check");
+    const text = stripComments(rawText);
+    assert.ok(
+      /\breadTierCandidates\(/.test(text),
+      "sessionStart must route its recent-briefs/resume journal reads through readTierCandidates — the safe-by-default FETCH stage",
+    );
+    assert.ok(
+      !/\bfs\.readFileSync\(/.test(text),
+      "sessionStart must not call fs.readFileSync directly anywhere in its own body — all journal content must come from the already-loaded .content field of a trust-tagged candidate (do NOT rely on this pattern silently no longer matching — see this test's own header)",
+    );
+    assert.ok(
+      !/\bfs\.readdirSync\(/.test(text),
+      "sessionStart must not call fs.readdirSync directly anywhere in its own body — directory enumeration for journal content must go through readTierCandidates, not a hand-rolled scan",
+    );
+    assert.ok(
+      !/includeUntrusted\s*:\s*true/.test(text),
+      "sessionStart must NEVER set includeUntrusted:true — that escape hatch is reserved for retrieval/query-memory.ts's own mandatory trust-filter stage (see PART E below); sessionStart relies on readTierCandidates' own safe-by-default (trusted-only) output instead",
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // PART G — cross-package extension: packages/mcp-server/src + packages/cli/src
 // (P0 independent-review FIX 3, 2026-08-30, wave/pipe-p0-trustclass).
 //

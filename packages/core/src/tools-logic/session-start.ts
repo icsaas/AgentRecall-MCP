@@ -20,7 +20,9 @@ import { readCorrections, readActiveCorrections, readP0Corrections, recordOutcom
 import { readBlindSpots } from "../storage/blind-spots-store.js";
 import { predictCorrection } from "./predict-correction.js";
 import { extractKeywords } from "../helpers/auto-name.js";
-import { isJournalFile, isRescueSourceTag, isRescueSourcedContent } from "../helpers/journal-filter.js";
+import { isJournalFile, isRescueSourceTag } from "../helpers/journal-filter.js";
+import { readTierCandidates, type MemoryCandidate } from "../retrieval/candidates.js";
+import { applyScope } from "../retrieval/scope.js";
 import { hasCaptureLogs, readRecentCaptures, type CaptureLogEntry } from "../helpers/journal-files.js";
 import { readRecentSessions, formatAgo } from "../storage/recency-index.js";
 import { wmList, wmRead, guessSlugFromWmLines, WM_LIVE_WINDOW_MS, rescueOrphanedWorkingMemory } from "../storage/working-memory.js";
@@ -500,8 +502,27 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
   // 4. Cross-project insights matching current context — cap at 1 (was 5).
   // The top match is almost always the only one worth surfacing at startup;
   // additional hits are noise. Agents can pull more via recall() when needed.
+  //
+  // W4 (2026-08-30) — wired onto the shared SCOPE stage (retrieval/scope.ts's
+  // `applyScope`, the same seam recall-insight.ts:56 already consumes) with
+  // scope:"all" — a DELIBERATE no-op, not a placeholder. `cross_project` is,
+  // by name and by this block's own original comment, meant to surface the
+  // single most relevant insight regardless of which project it came from —
+  // `recallInsights()`'s own project-correlation boost (projectBoost 1.2x
+  // same-project / 1.1x multi-project, palace/insights-index.ts) already
+  // encodes "prefer this project's own insights" as a RANKING signal, not an
+  // exclusion filter. Applying `scope:"project"` here would hard-exclude
+  // every genuinely transferable cross-project insight (defeating this
+  // block's whole purpose); `scope:"global"` would wrongly exclude same-
+  // project matches too. SessionStartInput exposes no caller-supplied scope
+  // knob (unlike RecallInsightInput.scope) — "all" preserves today's tested
+  // behavior byte-for-byte (session-start-injection.test.mjs /
+  // composite-tools.test.mjs assert on this array) while routing the block
+  // through the same shared stage every other scope-attributed consumer
+  // uses, so a future caller-supplied scope option is a one-line change
+  // here instead of a fresh migration.
   const context = input.context ?? slug;
-  const matched = recallInsights(context, 1, slug);
+  const matched = applyScope(recallInsights(context, 1, slug), slug, "all");
   const cross_project = matched.map((i) => ({
     title: sliceAtWord(i.title, 100),
     from_project: (i.projects?.[0] ?? (i.source ?? "unknown").replace(/\s+\d{4}-\d{2}-\d{2}.*$/, "")).slice(0, 30),
@@ -651,7 +672,40 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
     // never break orientation over a best-effort live signal
   }
 
-  // 5. Recent journal briefs — today + yesterday only
+  // 5. Recent journal briefs — today + yesterday only.
+  //
+  // Identity-trust (W4, 2026-08-30, wave/pipe-w4-session): both this block
+  // AND the "resume" block below now source content exclusively through
+  // `readTierCandidates("journal", slug)` — the trust-safe FETCH stage — in
+  // place of a raw fs.readdirSync+readFileSync scan. The rescue-quarantine
+  // choke (`isRescueSourcedContent`) is now STRUCTURAL: every candidate this
+  // function ever sees has ALREADY been trust-filtered by the shared reader
+  // (its safe-by-default posture, no opt-in flag) rather than each of these
+  // 2 call sites re-deriving the choke inline (this file's own prior "1
+  // place vs every consumer independently deciding" gap — see candidates.ts's
+  // header for the class of bug this closes). Deliberately NOT using
+  // `includeUntrusted: true`: that flag is a workspace-wide-guarded escape
+  // hatch reserved for retrieval/query-memory.ts's own mandatory trust-filter
+  // pipeline stage (identity-trust-completeness.test.mjs's PART E scans ALL
+  // 4 packages and fails the build if any other call site sets it) — every
+  // OTHER caller, this one included, gets the reader's DEFAULT trusted-only
+  // output, no inline `.untrusted` check needed at all.
+  //
+  // CHARACTERIZED behavior change, OUT OF the "non-rescue fixture" byte-
+  // identical equivalence scope (which is unaffected — there is nothing to
+  // diverge on when no rescue-tagged file exists): the pre-migration
+  // `olderCount`'s own documented residual ("a rescue card older than
+  // yesterday can still inflate this count by one") is now CLOSED as a
+  // structural side effect, not silently reintroduced — a rescue-tagged old
+  // file is excluded from `allJournalCandidates` entirely, the same as a
+  // rescue-tagged today/yesterday file always was. This is a genuine, if
+  // minor, correctness IMPROVEMENT (closing a previously-tracked gap), not a
+  // regression — see this wave's report.
+  //
+  // Single fetch reused by BOTH this block and the "resume" block below
+  // (PERF precedent already established in this file — see the corrections
+  // single-read comment further down) — one readTierCandidates() call
+  // instead of two independent raw directory scans.
   const dirs = journalDirs(slug);
   const today = todayISO();
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -660,46 +714,52 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
   let yesterdayBrief: string | null = null;
   let olderCount = 0;
 
+  // isJournalFile mirrors the OLD raw-scan filter exactly: readTierCandidates's
+  // own journal-live reader (via listJournalFiles) additionally surfaces
+  // capture/log files (`*-log.md`, `*--capture--*`) that isJournalFile
+  // excludes — filtering here reconstructs the identical candidate set the
+  // old `fs.readdirSync(dir).filter(isJournalFile)` scan produced.
+  const allJournalCandidates: MemoryCandidate[] = readTierCandidates("journal", slug).filter((c) =>
+    isJournalFile(c.file),
+  );
+
+  // Reconstruct the EXACT pre-migration traversal order for THIS block: dirs
+  // in journalDirs() order (primary, then legacy), WITHIN each dir sorted by
+  // filename DESCENDING — the old `.sort().reverse()` per-dir behavior.
+  // readTierCandidates's own natural order is dir-then-raw-filesystem-order
+  // (no per-dir alpha sort) — matches the "resume" block's OLD traversal
+  // (which never sorted within a dir either, see that block's own comment
+  // below) but NOT this block's, so the regrouping below is specific to this
+  // block only.
+  const candidatesByDir = new Map<string, MemoryCandidate[]>();
+  for (const c of allJournalCandidates) {
+    const dir = path.dirname(c.sourcePath);
+    const bucket = candidatesByDir.get(dir);
+    if (bucket) bucket.push(c);
+    else candidatesByDir.set(dir, [c]);
+  }
+  const recentOrderedCandidates: MemoryCandidate[] = [];
   for (const dir of dirs) {
-    if (!fs.existsSync(dir)) continue;
-    const files = fs.readdirSync(dir).filter(isJournalFile).sort().reverse();
-    for (const file of files) {
-      const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-      if (!dateMatch) continue;
-      const d = dateMatch[1];
-      if (d === today) {
-        const content = fs.readFileSync(path.join(dir, file), "utf-8");
-        // Identity-trust (CRITICAL-1 followup, 2026-08-20): this is the
-        // literal auto-printed "📓 Today:" line (cli/index.ts's hook-start
-        // render) — the red-team report's own worst-case surface, since it
-        // reaches an agent's context with NO tool call at all. Quarantine at
-        // the shared choke point before this file's content ever reaches
-        // `todayBrief`.
-        if (isRescueSourcedContent(content)) continue;
-        const brief = extractSection(content, "brief");
-        const raw = brief ? brief : content.split("\n").slice(0, 3).join(" ");
-        const entry = sliceAtWord(stripMarkdownHeaders(raw), SECTION_CHAR_LIMITS.recent_today);
-        todayBrief = todayBrief ? `${todayBrief} | ${entry}` : entry;
-      } else if (d === yesterday && !yesterdayBrief) {
-        const content = fs.readFileSync(path.join(dir, file), "utf-8");
-        if (isRescueSourcedContent(content)) continue; // identity-trust, 2026-08-20 — see above
-        const brief = extractSection(content, "brief");
-        const raw = brief ? brief : content.split("\n").slice(0, 3).join(" ");
-        yesterdayBrief = sliceAtWord(stripMarkdownHeaders(raw), SECTION_CHAR_LIMITS.recent_yesterday);
-      } else if (d < yesterday) {
-        // NOTE (scoped residual, 2026-08-20): `olderCount` is derived from
-        // the FILENAME only (no content read) for performance — this loop's
-        // whole point is to avoid an O(all journal files ever written) read
-        // cost (see this codebase's own PERF precedent in journal-files.ts's
-        // `updateIndex`). A rescue card older than yesterday can therefore
-        // still inflate this count by one, affecting only `sessionsCount`/
-        // `isEmpty` bookkeeping — it is NEVER surfaced as content (title,
-        // brief, trajectory) anywhere in this function once it falls out of
-        // the today/yesterday window. Tracked as a known, low-severity,
-        // count-only residual — not the CRITICAL content-surfacing gap this
-        // fix closes.
-        olderCount++;
-      }
+    const bucket = candidatesByDir.get(dir);
+    if (!bucket) continue;
+    bucket.sort((a, b) => (a.file < b.file ? 1 : a.file > b.file ? -1 : 0)); // filename DESC
+    recentOrderedCandidates.push(...bucket);
+  }
+
+  for (const candidate of recentOrderedCandidates) {
+    const d = candidate.date;
+    if (!d) continue; // mirrors the old `if (!dateMatch) continue`
+    if (d === today) {
+      const brief = extractSection(candidate.content, "brief");
+      const raw = brief ? brief : candidate.content.split("\n").slice(0, 3).join(" ");
+      const entry = sliceAtWord(stripMarkdownHeaders(raw), SECTION_CHAR_LIMITS.recent_today);
+      todayBrief = todayBrief ? `${todayBrief} | ${entry}` : entry;
+    } else if (d === yesterday && !yesterdayBrief) {
+      const brief = extractSection(candidate.content, "brief");
+      const raw = brief ? brief : candidate.content.split("\n").slice(0, 3).join(" ");
+      yesterdayBrief = sliceAtWord(stripMarkdownHeaders(raw), SECTION_CHAR_LIMITS.recent_yesterday);
+    } else if (d < yesterday) {
+      olderCount++;
     }
   }
 
@@ -801,36 +861,28 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
     // lexicographically newest matching filename" blindly (pre-fix
     // behavior) could hand the trajectory extraction below a hijacked
     // rescue card's fabricated content instead of the real most-recent
-    // session's. Collect (date, path) candidates newest-first from
-    // filenames alone (cheap — same `isJournalFile` filter as everywhere
-    // else, no content read), then read+quarantine-check candidate by
-    // candidate, stopping at the first one that is NOT rescue-sourced.
-    const dateCandidates: Array<{ date: string; path: string }> = [];
-    for (const dir of dirs) {
-      if (!fs.existsSync(dir)) continue;
-      const files = fs.readdirSync(dir).filter(isJournalFile);
-      for (const file of files) {
-        const dateMatch = file.match(/^(\d{4}-\d{2}-\d{2})/);
-        if (!dateMatch) continue;
-        dateCandidates.push({ date: dateMatch[1], path: path.join(dir, file) });
-      }
-    }
-    dateCandidates.sort((a, b) => b.date.localeCompare(a.date));
-
-    let mostRecentDate: string | null = null;
-    let mostRecentContent: string | null = null;
-    for (const cand of dateCandidates) {
-      let content: string;
-      try {
-        content = fs.readFileSync(cand.path, "utf-8");
-      } catch {
-        continue;
-      }
-      if (isRescueSourcedContent(content)) continue;
-      mostRecentDate = cand.date;
-      mostRecentContent = content;
-      break;
-    }
+    // session's. Stop at the first candidate that is NOT rescue-sourced.
+    //
+    // W4 migration (2026-08-30): reuses `allJournalCandidates` (built above,
+    // for the "recent" block; already trust-filtered by readTierCandidates'
+    // own safe-by-default posture — see that block's comment for why this
+    // never sets `includeUntrusted: true`) rather than re-scanning the
+    // journal directories a second time — one readTierCandidates() fetch
+    // serves both blocks. `allJournalCandidates` is ALREADY in the exact
+    // order the pre-migration `dateCandidates` array was built in: dirs in
+    // journalDirs() order, raw (unsorted) per-dir filesystem order — this
+    // block's OLD loop, unlike the "recent" block's, never applied a
+    // per-dir filename sort — then readTierCandidates's own underlying
+    // `listJournalFiles()` applies the identical final stable sort-by-date-
+    // descending the old `dateCandidates.sort(...)` line applied. Same
+    // construction procedure, same input dirs, same order — no re-sort
+    // needed here. The first entry is, by construction, the most recent
+    // TRUSTED candidate — no per-candidate `.untrusted` check needed (a
+    // rescue-sourced entry, even one sharing today's date with a genuine
+    // card, was already excluded upstream).
+    const mostRecent = allJournalCandidates[0];
+    const mostRecentDate: string | null = mostRecent?.date ?? null;
+    const mostRecentContent: string | null = mostRecent?.content ?? null;
 
     let lastTrajectory: string | null = null;
     if (mostRecentContent) {
