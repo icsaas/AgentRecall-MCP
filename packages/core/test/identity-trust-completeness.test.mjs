@@ -1415,6 +1415,13 @@ describe("destination-proof — a hijacked rescue card cannot outrank/impersonat
     const result = await core.journalColdStart({ project: REAL_SLUG });
     assert.ok(!result.cache.hot.entries.some((e) => e.brief && e.brief.includes(HIJACK_TERM_2)), `journalColdStart's hot window must never surface a rescue-tagged brief; got ${JSON.stringify(result.cache.hot.entries)}`);
     assert.ok(result.cache.hot.entries.some((e) => e.brief && e.brief.includes(GENUINE_TERM)), `journalColdStart's hot window must still surface the genuine sibling's brief; got ${JSON.stringify(result.cache.hot.entries)}`);
+    // W3a review fix: the quarantined rescue card must still be COUNTED (existence
+    // preserved, brief null) — so the bucket sum must always equal total_entries.
+    // Pre-fix this diverged (rescue card `continue`d out of hot while total_entries
+    // still counted it): a silently-wrong surfaced count. This is the regression guard.
+    const bucketSum = result.cache.hot.count + result.cache.warm.count + result.cache.cold.count;
+    assert.equal(result.total_entries, bucketSum, `journalColdStart count invariant: total_entries (${result.total_entries}) must equal hot+warm+cold (${bucketSum}) even when a rescue-tagged card falls in the hot window`);
+    assert.ok(result.cache.hot.entries.some((e) => e.brief === null), `the quarantined rescue card must remain present in hot with a null brief (existence preserved), not be dropped; got ${JSON.stringify(result.cache.hot.entries)}`);
   });
 
   it("palaceLint never echoes a rescue-tagged room file's raw content into its issues (structural-only, evidence for the SAFE reclassification)", async () => {

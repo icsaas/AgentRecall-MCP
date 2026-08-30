@@ -142,21 +142,29 @@ export async function journalColdStart(input: JournalColdStartInput): Promise<Jo
     if (ageDays <= 1.5) {
       const fullPath = path.join(entry.dir, entry.file);
       const candidate = journalCandidateByPath.get(fullPath);
-      // Rescue-tagged (trust-filtered) or otherwise unreadable — never
-      // surfaced. Graceful: no crash, this entry is simply absent from hot.
-      if (!candidate) continue;
       const state = readState(slug, entry.date);
-      // Threshold switched from the old code's byte-count (`stats.size`) to
-      // a char-count (`candidate.content.length`, UTF-16 code units) — a
-      // minor, strictly-more-correct change, not a regression: the old code
-      // compared bytes but always SLICED by char count, so a CJK-heavy file
-      // could have byte-size > 20000 while its char length was well under
-      // it, appending a false "...(truncated)" marker to content that was
-      // never actually cut. Char-count-in/char-count-slice is now consistent.
-      const content = candidate.content.length > 20000
-        ? candidate.content.slice(0, 20000) + "\n...(truncated)"
-        : candidate.content;
-      hot.push({ date: entry.date, state, brief: extractSection(content, "brief") });
+      // Wave 3a review fix (2026-08-30): a rescue-tagged (trust-filtered) or
+      // otherwise-unreadable hot-window entry still EXISTS — its date is
+      // mtime-derived, not attacker-controlled — so it is counted in `hot`
+      // with a NULL brief (content quarantined, existence preserved), never
+      // dropped. The old `if (!candidate) continue` skipped it from every
+      // bucket while `total_entries` (= entries.length) still counted it, so
+      // hot+warm+cold diverged from total_entries whenever a rescue card fell
+      // in the 1.5-day window — a silently-wrong surfaced count. This mirrors
+      // the journal-list quarantine-not-drop decision; the bucket sum now
+      // always equals total_entries.
+      let brief: string | null = null;
+      if (candidate) {
+        // Threshold uses char-count (`content.length`, UTF-16 code units),
+        // consistent with the char-count slice below — the old code compared
+        // bytes (`stats.size`) but sliced by chars, so a CJK-heavy file could
+        // get a false "...(truncated)" marker while never actually being cut.
+        const content = candidate.content.length > 20000
+          ? candidate.content.slice(0, 20000) + "\n...(truncated)"
+          : candidate.content;
+        brief = extractSection(content, "brief");
+      }
+      hot.push({ date: entry.date, state, brief });
     } else if (ageDays <= 7) {
       warmCount++;
     } else {
