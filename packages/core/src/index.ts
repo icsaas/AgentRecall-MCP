@@ -735,3 +735,9 @@ export type {
 // `{projects?: string[]}[]` array without going through queryMemory() or
 // recallInsight() — see retrieval/scope.ts's own doc comment.
 export { applyScope } from "./retrieval/scope.js";
+
+// Wave 5a CONTRADICTION stage (2026-08-31) — exported so a test (or a later
+// caller) can exercise the pure comparator directly without going through
+// queryMemory() — see retrieval/contradiction.ts's own doc comment.
+export { detectContradictions } from "./retrieval/contradiction.js";
+export type { ContradictionItem, ContradictionResult } from "./retrieval/contradiction.js";
