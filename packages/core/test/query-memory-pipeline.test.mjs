@@ -381,7 +381,13 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       );
     });
 
-    it("E2 — kv-shaped contradiction (env: production vs env: staging): same down-rank+annotate behavior via a different grammar path", async () => {
+    // E2 was originally a GREEN down-rank proof via the kv-token grammar path
+    // (env: production -> env: staging). W5a SALVAGE (2026-08-31, independent
+    // review HIGH-1/HIGH-2): the kv-token path is REMOVED from
+    // contradiction.ts's grammarConflict entirely (see that file's header) —
+    // this is now a FP-REMOVED proof instead: the exact same kv-shaped
+    // fixture that used to trigger a down-rank must no longer do so at all.
+    it("E2 — kv-shaped phrasing (env: production vs env: staging) no longer triggers a contradiction — kv-token detection removed at the root (W5a salvage)", async () => {
       const jdir = core.journalDir(PROJECT);
       fs.mkdirSync(jdir, { recursive: true });
       const TERM = "PIPE5A_KV_TERM";
@@ -397,41 +403,51 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       );
 
       const result = await core.queryMemory({ query: `${TERM} gamma delta`, project: PROJECT, tiers: ["journal"] });
-      const stale = result.items.find((i) => i.excerpt?.includes("production"));
-      const current = result.items.find((i) => i.excerpt?.includes("staging"));
+      const production = result.items.find((i) => i.excerpt?.includes("production"));
+      const staging = result.items.find((i) => i.excerpt?.includes("staging"));
 
-      assert.ok(stale, "stale (env: production) candidate must still be present");
-      assert.ok(current, "current (env: staging) candidate must be present");
-      assert.equal(stale.supersededBy, current.id, "the stale kv candidate must be annotated with the current sibling's id");
-
-      const staleIdx = result.items.indexOf(stale);
-      const currentIdx = result.items.indexOf(current);
-      assert.ok(currentIdx < staleIdx, "current (env: staging) must rank strictly above stale (env: production)");
+      assert.ok(production, "precondition: the 'env: production' candidate must still surface");
+      assert.ok(staging, "precondition: the 'env: staging' candidate must still surface");
+      assert.equal(production.supersededBy, undefined, "RED (pre-salvage) / GREEN (post-salvage): kv-token detection removed — must never be annotated superseded");
+      assert.equal(staging.supersededBy, undefined, "kv-token detection removed — must never be annotated superseded");
+      assert.equal(production.conflictsWith, undefined, "kv-token detection removed — must carry no conflictsWith");
+      assert.equal(staging.conflictsWith, undefined, "kv-token detection removed — must carry no conflictsWith");
     });
 
-    it("E3 — non-vacuity: distinct keys (alpha vs beta) share no fact, so the stage must NOT annotate or reorder them — natural recency/exactness order is preserved", async () => {
+    // E3's original fixture ("alpha: red" / "beta: blue") was kv-shaped.
+    // Post-salvage the kv path doesn't exist at all, so that fixture would
+    // now pass VACUOUSLY (true because there is no kv grammar left to run,
+    // not because distinct KEYS were correctly ignored by the surviving
+    // grammar). Switched to a version-token fixture so this test still
+    // exercises a LIVE code path (extractVersionTokens' per-candidate key
+    // extraction) rather than a defunct one — same "distinct keys, no
+    // shared fact" intent as before.
+    it("E3 — non-vacuity: distinct version-token keys (alpha vs beta) share no fact, so the stage must NOT annotate or reorder them — natural recency/exactness order is preserved", async () => {
       const jdir = core.journalDir(PROJECT);
       fs.mkdirSync(jdir, { recursive: true });
       const TERM = "PIPE5A_NOCONFLICT_TERM";
-      // Same asymmetric-exactness shape as E1/E2 (older side matches more
-      // query words) — if the stage wrongly fired here, it would demote the
+      // Same asymmetric-exactness shape as E1 (older side matches more query
+      // words) — if the stage wrongly fired here, it would demote the
       // older/stronger-matching item below the newer/weaker one, exactly
-      // like E1/E2's GREEN state. Preserving the "wrong-looking" natural
-      // order (older ranks first) proves the stage stayed inert.
+      // like E1's GREEN state. Preserving the "wrong-looking" natural order
+      // (older ranks first) proves the stage stayed inert. "alpha 1.0.0" /
+      // "beta 2.0.0" extract DIFFERENT keys (`alpha`/`beta`) under
+      // extractVersionTokens' own "word immediately before the version
+      // number" rule — no shared key, so grammarConflict must return false.
       fs.writeFileSync(
         path.join(jdir, "2026-03-01--card--distinct-a.md"),
-        `# decision\nalpha: red for testing ${TERM} epsilon zeta\n`,
+        `# decision\nalpha 1.0.0 for testing ${TERM} epsilon zeta\n`,
         "utf-8",
       );
       fs.writeFileSync(
         path.join(jdir, "2026-08-15--card--distinct-b.md"),
-        `# decision\nbeta: blue for testing ${TERM} epsilon\n`,
+        `# decision\nbeta 2.0.0 for testing ${TERM} epsilon\n`,
         "utf-8",
       );
 
       const result = await core.queryMemory({ query: `${TERM} epsilon zeta`, project: PROJECT, tiers: ["journal"] });
-      const a = result.items.find((i) => i.excerpt?.includes("alpha:"));
-      const b = result.items.find((i) => i.excerpt?.includes("beta:"));
+      const a = result.items.find((i) => i.excerpt?.includes("alpha"));
+      const b = result.items.find((i) => i.excerpt?.includes("beta"));
 
       assert.ok(a && b, `both distinct-key candidates must be present; got ${JSON.stringify(result.items)}`);
       assert.equal(a.supersededBy, undefined, "no shared key exists — 'alpha' candidate must not be annotated superseded");
@@ -444,18 +460,23 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       assert.ok(aIdx < bIdx, "un-penalized natural order (stronger exactness first) must be preserved when there is no real contradiction");
     });
 
-    it("E4 — false-positive guard: two candidates sharing the SAME key AND SAME value ('env is production' on two services) must never be flagged as conflicting", async () => {
+    // E4's original fixture ("env is production" x2) was also kv-shaped —
+    // same vacuity risk as E3 post-salvage. Switched to a version-token
+    // same-key-same-value fixture so this remains a live proof that the
+    // SURVIVING grammar path still correctly treats equal values as
+    // non-conflicting, not merely that the removed kv path is gone.
+    it("E4 — false-positive guard: two candidates sharing the SAME version-token key AND SAME value ('AgentRecall version 3.5.0' on two services) must never be flagged as conflicting", async () => {
       const jdir = core.journalDir(PROJECT);
       fs.mkdirSync(jdir, { recursive: true });
       const TERM = "PIPE5A_FP_TERM";
       fs.writeFileSync(
         path.join(jdir, "2026-04-01--card--fp-a.md"),
-        `# decision\nenv is production for ${TERM} eta theta\n`,
+        `# decision\nAgentRecall version 3.5.0 for ${TERM} eta theta\n`,
         "utf-8",
       );
       fs.writeFileSync(
         path.join(jdir, "2026-04-02--card--fp-b.md"),
-        `# decision\nenv is production also for ${TERM} eta\n`,
+        `# decision\nAgentRecall version 3.5.0 also for ${TERM} eta\n`,
         "utf-8",
       );
 
@@ -467,93 +488,116 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       }
     });
 
-    // E4b/E4c close a HIGH finding from this wave's own code-reviewer pass
-    // (2026-08-31): the STATUS-token grammar path (unlike version/kv, which
-    // require a matching KEY before values are compared) had zero test
-    // coverage. See contradiction.ts's grammarConflict status-branch comment
-    // for the full reasoning these two tests prove.
-    it("E4b — genuine status-category flip (blocked -> shipped/active): down-ranked + annotated exactly like the version/kv paths", async () => {
+    // E4b/E4c ORIGINALLY closed a HIGH finding from this wave's own
+    // code-reviewer pass (2026-08-31) by adding status-branch coverage
+    // (a genuine flip case + a documented-over-inclusive-but-safe case).
+    // W5a SALVAGE (2026-08-31, INDEPENDENT review, separate from and after
+    // that code-reviewer pass): that same status branch, plus the kv
+    // branch, were found to be false-positive-PRONE in a way that defeats
+    // this stage's own safety intent (HIGH-1, HIGH-2 — see
+    // contradiction.ts's header for the full mechanism). Both branches are
+    // now REMOVED from grammarConflict entirely. E4b/E4c are replaced (not
+    // just edited) with the two literal phrasings the review named as
+    // proof the FP sources are gone — RED under the old status/kv
+    // detection (both used to demote), GREEN after the version-only
+    // restriction (neither demotes now).
+    it("E4b — FP-removed (HIGH-1): 'status: blocked' vs 'status: stuck' — same status CATEGORY, common phrasing that used to defeat the category-equivalence safeguard via the now-removed kv branch — neither candidate is demoted anymore", async () => {
       const jdir = core.journalDir(PROJECT);
       fs.mkdirSync(jdir, { recursive: true });
       const TERM = "PIPE5A_STATUS_TERM";
       fs.writeFileSync(
-        path.join(jdir, "2026-01-15--card--stale-status.md"),
-        `# decision\ndeploy status blocked ${TERM} rho tau chi\n`,
+        path.join(jdir, "2026-01-15--card--status-a.md"),
+        `# decision\ndeploy status: blocked ${TERM} rho tau chi\n`,
         "utf-8",
       );
       fs.writeFileSync(
-        path.join(jdir, "2026-08-20--card--current-status.md"),
-        `# decision\ndeploy status shipped ${TERM} rho tau\n`,
+        path.join(jdir, "2026-08-20--card--status-b.md"),
+        `# decision\ndeploy status: stuck ${TERM} rho tau\n`,
         "utf-8",
       );
 
       const result = await core.queryMemory({ query: `${TERM} rho tau chi`, project: PROJECT, tiers: ["journal"] });
-      const stale = result.items.find((i) => i.excerpt?.includes("blocked"));
-      const current = result.items.find((i) => i.excerpt?.includes("shipped"));
+      const blocked = result.items.find((i) => i.excerpt?.includes("blocked"));
+      const stuck = result.items.find((i) => i.excerpt?.includes("stuck"));
 
-      assert.ok(stale && current, `both status candidates must be present; got ${JSON.stringify(result.items)}`);
-      assert.equal(stale.supersededBy, current.id, "the 'blocked' candidate must be annotated superseded by the 'shipped'/active one");
-      const staleIdx = result.items.indexOf(stale);
-      const currentIdx = result.items.indexOf(current);
-      assert.ok(currentIdx < staleIdx, "GREEN: 'shipped' (active) must rank strictly above 'blocked' after the contradiction stage");
+      assert.ok(blocked && stuck, `precondition: both status candidates must be present; got ${JSON.stringify(result.items)}`);
+      assert.equal(blocked.supersededBy, undefined, "RED (pre-salvage) / GREEN (post-salvage): status/kv detection removed — 'blocked' must never be annotated superseded");
+      assert.equal(stuck.supersededBy, undefined, "status/kv detection removed — 'stuck' must never be annotated superseded");
+      assert.equal(blocked.conflictsWith, undefined, "status/kv detection removed — 'blocked' must carry no conflictsWith");
+      assert.equal(stuck.conflictsWith, undefined, "status/kv detection removed — 'stuck' must carry no conflictsWith");
     });
 
-    it("E4c — documented over-inclusive status match (topically UNRELATED status words) is annotated per the grammar's wider reach, but NEVER dropped — the down-rank-not-drop safety net proof the reviewer's HIGH finding asked for", async () => {
+    it("E4c — FP-removed (HIGH-2): 'priority: high' (marketing decision) vs 'priority: low' (unrelated cleanup task) — topically-unrelated items sharing only a generic single-word key — neither candidate is demoted anymore", async () => {
       const jdir = core.journalDir(PROJECT);
       fs.mkdirSync(jdir, { recursive: true });
       const TERM = "PIPE5A_UNRELATED_STATUS_TERM";
-      // Two candidates about ENTIRELY different subjects that each happen to
-      // contain a different status word ("done" vs "broken") — no shared
-      // topic, no shared kv/version key. Per contradiction.ts's documented
-      // status-branch reach (no per-fact key gating, unlike version/kv),
-      // these WILL be flagged conflicting — this test proves that is safe
-      // (never a dropped candidate), not that it is topically correct.
+      // NOTE ON FIXTURE CONSTRUCTION (kv-token path is REMOVED by this diff
+      // — this note explains a HISTORICAL property of the OLD grammar this
+      // fixture was built to reproduce, not current runtime behavior):
+      // "priority:" is placed as the FIRST word of the excerpt (immediately
+      // after the journal title's fixed "{date} / top" prefix, since
+      // neither file has a "## " heading) so the OLD kv extractor's
+      // preceding-context capture would glue on the SAME "top_priority" key
+      // for both sides — verified empirically via node against
+      // `extractKVTokens` (still exported from conflict-scan.ts, just no
+      // longer called by contradiction.ts) on the reconstructed
+      // "{title} {excerpt}" string, yielding `top_priority`->`high` and
+      // `top_priority`->`low` respectively BEFORE this diff's fix. Putting
+      // the differentiating topic words (marketing launch / repo cleanup)
+      // AFTER the value avoids them being folded into the key, which is
+      // what made an earlier draft of this fixture (topic words BEFORE
+      // "priority:") accidentally NOT reproduce HIGH-2 even under the old
+      // grammar — see this diff's own verification notes. With kv detection
+      // removed, this fixture now simply asserts no annotation fires at
+      // all, for either candidate.
       fs.writeFileSync(
         path.join(jdir, "2026-06-01--card--unrelated-a.md"),
-        `# decision\nthe demo presentation is done for today ${TERM}\n`,
+        `# decision\npriority: high for the marketing launch ${TERM}\n`,
         "utf-8",
       );
       fs.writeFileSync(
         path.join(jdir, "2026-06-02--card--unrelated-b.md"),
-        `# decision\nthe separate backend service is broken currently ${TERM}\n`,
+        `# decision\npriority: low for the repo cleanup ${TERM}\n`,
         "utf-8",
       );
 
       const result = await core.queryMemory({ query: TERM, project: PROJECT, tiers: ["journal"] });
-      const done = result.items.find((i) => i.excerpt?.includes("done"));
-      const broken = result.items.find((i) => i.excerpt?.includes("broken"));
+      const high = result.items.find((i) => i.excerpt?.includes("high"));
+      const low = result.items.find((i) => i.excerpt?.includes("low"));
 
       assert.ok(
-        done && broken,
-        `SAFETY: both topically-unrelated candidates must still be present — the stage must never DROP a candidate even when its match is topically wrong; got ${JSON.stringify(result.items)}`,
+        high && low,
+        `precondition: both topically-unrelated candidates must be present; got ${JSON.stringify(result.items)}`,
       );
-      // Documented (not asserted as "correct"): the grammar's status branch
-      // has no topical key, so this pair IS expected to be flagged — proving
-      // the annotation fires is part of proving the safety net actually
-      // engaged (an untriggered stage proving "never drops" would be vacuous).
-      assert.ok(
-        (done.conflictsWith ?? []).length > 0 || (broken.conflictsWith ?? []).length > 0,
-        "precondition: this documented over-inclusive case must actually trigger the status branch for this test to be non-vacuous",
-      );
+      assert.equal(high.supersededBy, undefined, "RED (pre-salvage) / GREEN (post-salvage): kv detection removed — 'priority: high' must never be annotated superseded");
+      assert.equal(low.supersededBy, undefined, "kv detection removed — 'priority: low' must never be annotated superseded");
+      assert.equal(high.conflictsWith, undefined, "kv detection removed — the generic 'priority' key must no longer flag unrelated topics as conflicting");
+      assert.equal(low.conflictsWith, undefined, "kv detection removed — the generic 'priority' key must no longer flag unrelated topics as conflicting");
     });
 
+    // E5's original fixture ("mode: strict" / "mode: relaxed") was
+    // kv-shaped. W5a salvage: switched to a version-token fixture so this
+    // remains a LIVE proof of resolveDirection's ambiguous-tie branch
+    // (which is orthogonal to which extractor found the shared key) rather
+    // than exercising the now-removed kv path.
     it("E5 — ambiguous same-date journal tie (no date signal, journal never gets an order tie-break): BOTH sides are annotated conflicting, NEITHER is penalized/superseded", async () => {
       const jdir = core.journalDir(PROJECT);
       fs.mkdirSync(jdir, { recursive: true });
       const TERM = "PIPE5A_TIE_TERM";
-      // Two entries, the SAME authored date — journal's direction rule
-      // ("older authored date") cannot resolve a tie, and journal
+      // Two entries, the SAME authored date, sharing the version-token key
+      // "agentrecall" with differing semver values — journal's direction
+      // rule ("older authored date") cannot resolve a tie, and journal
       // deliberately never receives an `order` fallback (see
       // applyContradictionStage's own comment) — so this must land in the
       // fully-ambiguous branch: annotate both, penalize neither.
       fs.writeFileSync(
         path.join(jdir, "2026-05-05--card--tie-a.md"),
-        `# decision\nmode: strict for build ${TERM} iota kappa lambda\n`,
+        `# decision\nAgentRecall version 3.5.0 for build ${TERM} iota kappa lambda\n`,
         "utf-8",
       );
       fs.writeFileSync(
         path.join(jdir, "2026-05-05--card--tie-b.md"),
-        `# decision\nmode: relaxed for build ${TERM} iota kappa lambda\n`,
+        `# decision\nAgentRecall version 3.6.0 for build ${TERM} iota kappa lambda\n`,
         "utf-8",
       );
       // A 3rd, unrelated (no shared grammar key) candidate with a score
@@ -569,21 +613,21 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       );
 
       const result = await core.queryMemory({ query: `${TERM} iota kappa lambda`, project: PROJECT, tiers: ["journal"] });
-      const strict = result.items.find((i) => i.excerpt?.includes("mode: strict"));
-      const relaxed = result.items.find((i) => i.excerpt?.includes("mode: relaxed"));
+      const v350 = result.items.find((i) => i.excerpt?.includes("3.5.0"));
+      const v360 = result.items.find((i) => i.excerpt?.includes("3.6.0"));
       const unrelated = result.items.find((i) => i.excerpt?.includes("just a general note"));
 
-      assert.ok(strict && relaxed && unrelated, `all 3 candidates must be present; got ${JSON.stringify(result.items)}`);
-      assert.equal(strict.supersededBy, undefined, "an ambiguous (no-signal) tie must never be resolved into a superseded direction");
-      assert.equal(relaxed.supersededBy, undefined, "an ambiguous (no-signal) tie must never be resolved into a superseded direction");
-      assert.ok((strict.conflictsWith ?? []).includes(relaxed.id), "the tied pair must still annotate each other as conflicting");
-      assert.ok((relaxed.conflictsWith ?? []).includes(strict.id), "the tied pair must still annotate each other as conflicting");
+      assert.ok(v350 && v360 && unrelated, `all 3 candidates must be present; got ${JSON.stringify(result.items)}`);
+      assert.equal(v350.supersededBy, undefined, "an ambiguous (no-signal) tie must never be resolved into a superseded direction");
+      assert.equal(v360.supersededBy, undefined, "an ambiguous (no-signal) tie must never be resolved into a superseded direction");
+      assert.ok((v350.conflictsWith ?? []).includes(v360.id), "the tied pair must still annotate each other as conflicting");
+      assert.ok((v360.conflictsWith ?? []).includes(v350.id), "the tied pair must still annotate each other as conflicting");
 
-      const strictIdx = result.items.indexOf(strict);
-      const relaxedIdx = result.items.indexOf(relaxed);
+      const v350Idx = result.items.indexOf(v350);
+      const v360Idx = result.items.indexOf(v360);
       const unrelatedIdx = result.items.indexOf(unrelated);
       assert.ok(
-        strictIdx < unrelatedIdx && relaxedIdx < unrelatedIdx,
+        v350Idx < unrelatedIdx && v360Idx < unrelatedIdx,
         `neither tied item may be penalized below the unrelated 3rd candidate; got order ${JSON.stringify(result.items.map((i) => i.excerpt))}`,
       );
     });
@@ -637,24 +681,33 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
         assert.deepEqual(conflictsWith.get(1), [0]);
       });
 
+      // W5a salvage (2026-08-31): the 3 subtests below originally used
+      // kv-shaped text ("mode: strict"/"mode: relaxed", "alpha: red"/"beta:
+      // blue") to exercise detectContradictions() directly. Since the kv
+      // extractor is no longer imported by contradiction.ts at all, that
+      // text now produces zero grammar matches regardless of what it says —
+      // switched to version-token text so these remain LIVE proofs of
+      // resolveDirection's order-fallback/ambiguous-tie/no-shared-key logic
+      // (which is orthogonal to which extractor supplied the shared key),
+      // not vacuous passes against a defunct code path.
       it("falls back to order when dates tie (palace-style same-day tie-break, higher order = current)", () => {
         const itemsSameDate = [
-          { text: "mode: strict", date: "2026-05-05", order: 3 },
-          { text: "mode: relaxed", date: "2026-05-05", order: 9 },
+          { text: "Widget version 1.0.0", date: "2026-05-05", order: 3 },
+          { text: "Widget version 2.0.0", date: "2026-05-05", order: 9 },
         ];
         const r1 = core.detectContradictions(itemsSameDate);
         assert.equal(r1.supersededBy.get(0), 1, "lower order (3) must be superseded by higher order (9) when dates tie exactly");
 
         const itemsNoDate = [
-          { text: "mode: strict", order: 5 },
-          { text: "mode: relaxed", order: 8 },
+          { text: "Widget version 1.0.0", order: 5 },
+          { text: "Widget version 2.0.0", order: 8 },
         ];
         const r2 = core.detectContradictions(itemsNoDate);
         assert.equal(r2.supersededBy.get(0), 1, "with no date at all, order alone must resolve the direction");
       });
 
       it("is fully ambiguous with no date AND no order signal — annotates both, resolves neither", () => {
-        const items = [{ text: "mode: strict" }, { text: "mode: relaxed" }];
+        const items = [{ text: "Widget version 1.0.0" }, { text: "Widget version 2.0.0" }];
         const { supersededBy, conflictsWith } = core.detectContradictions(items);
         assert.equal(supersededBy.size, 0, "no signal at all must never guess a direction");
         assert.deepEqual(conflictsWith.get(0), [1]);
@@ -663,22 +716,22 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
 
       it("is grammar-negative when no key is shared — no conflict, regardless of date", () => {
         const items = [
-          { text: "alpha: red", date: "2026-01-01" },
-          { text: "beta: blue", date: "2026-08-01" },
+          { text: "alpha 1.0.0", date: "2026-01-01" },
+          { text: "beta 2.0.0", date: "2026-08-01" },
         ];
         const { supersededBy, conflictsWith } = core.detectContradictions(items);
         assert.equal(supersededBy.size, 0);
         assert.equal(conflictsWith.size, 0);
       });
 
-      it("prose-semantic gap (documented, out of grammar reach): PostgreSQL->CockroachDB migration prose shares no version/status/kv key — confirmed NOT detected, matching this wave's Challenge A resolution", () => {
+      it("prose-semantic gap (documented, out of grammar reach): PostgreSQL->CockroachDB migration prose shares no version-token key — confirmed NOT detected, matching this wave's Challenge A resolution (unaffected by the W5a salvage: neither sentence ever had a version number)", () => {
         const items = [
           { text: "We use PostgreSQL as our primary production database.", date: "2026-08-01" },
           { text: "CORRECTION: We fully migrated OFF PostgreSQL to CockroachDB. PostgreSQL is DEPRECATED.", date: "2026-08-18" },
         ];
         const { supersededBy, conflictsWith } = core.detectContradictions(items);
         assert.equal(supersededBy.size, 0, "prose-semantic contradictions are out of this wave's grammar reach by design");
-        assert.equal(conflictsWith.size, 0, "no version/status/kv key is shared between the two sentences");
+        assert.equal(conflictsWith.size, 0, "no version-token key is shared between the two sentences");
       });
     });
 
@@ -701,6 +754,88 @@ describe("retrieval/query-memory.ts — queryMemory() pipeline (Wave 2)", () => 
       assert.equal(result.items.length, 1, "single-candidate tier must surface normally, untouched by the contradiction stage");
       assert.equal(result.items[0].supersededBy, undefined);
       assert.equal(result.items[0].conflictsWith, undefined);
+    });
+
+    // E9/E10 close HIGH-3 from the W5a salvage's independent review
+    // (2026-08-31): `supersededBy`/`conflictsWith` were computed correctly
+    // by queryMemory() all along, but silently dropped by BOTH
+    // `smart-recall.ts`'s `localRecallSearch` field-list map AND
+    // `journal-search.ts`'s `journalSearch` field-list map before this
+    // fix — making the annotation invisible to any agent reading the
+    // `smart_recall`/`journal_search` MCP tools' JSON output, even though
+    // the ranking it produced (the down-rank) was already visible. These
+    // two tests go through the REAL external contract types
+    // (`SmartRecallResultItem`/`JournalSearchResult.results`), not
+    // `queryMemory()` directly like E1-E8 above — proving the field
+    // actually reaches the surface an agent sees, not just the internal
+    // pipeline shape.
+    it("E9 — HIGH-3 fix: the annotation reaches the SmartRecallResult contract (smart_recall's own external result shape), not just queryMemory()'s internal QueryMemoryItem", async () => {
+      const jdir = core.journalDir(PROJECT);
+      fs.mkdirSync(jdir, { recursive: true });
+      const TERM = "PIPE5A_CONTRACT_TERM";
+      fs.writeFileSync(
+        path.join(jdir, "2026-01-01--card--contract-stale.md"),
+        `# decision\nAgentRecall version 3.5.0 was proposed ${TERM} alpha beta\n`,
+        "utf-8",
+      );
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-04--card--contract-current.md"),
+        `# decision\nAgentRecall version 3.4.41 shipped ${TERM} alpha\n`,
+        "utf-8",
+      );
+
+      const result = await core.smartRecall({ query: `${TERM} alpha beta`, project: PROJECT, limit: 10 });
+      const stale = result.results.find((r) => r.excerpt?.includes("3.5.0"));
+      const current = result.results.find((r) => r.excerpt?.includes("3.4.41"));
+
+      assert.ok(stale, `precondition: the stale (3.5.0) result must surface via smartRecall(); got ${JSON.stringify(result.results)}`);
+      assert.ok(current, `precondition: the current (3.4.41) result must surface via smartRecall(); got ${JSON.stringify(result.results)}`);
+      assert.equal(
+        stale.supersededBy,
+        current.id,
+        "HIGH-3 FIX: SmartRecallResultItem must now carry supersededBy pointing at the current sibling's id — this was silently dropped before the salvage",
+      );
+      assert.ok(
+        (stale.conflictsWith ?? []).includes(current.id),
+        `HIGH-3 FIX: SmartRecallResultItem must now carry conflictsWith; got ${JSON.stringify(stale.conflictsWith)}`,
+      );
+    });
+
+    it("E10 — HIGH-3 fix: the annotation reaches the JournalSearchResult contract (journal_search's own external result shape)", async () => {
+      const jdir = core.journalDir(PROJECT);
+      fs.mkdirSync(jdir, { recursive: true });
+      const TERM = "PIPE5A_JSEARCH_CONTRACT_TERM";
+      fs.writeFileSync(
+        path.join(jdir, "2026-01-01--card--jsearch-stale.md"),
+        `# decision\nAgentRecall version 3.5.0 was proposed ${TERM} alpha beta\n`,
+        "utf-8",
+      );
+      fs.writeFileSync(
+        path.join(jdir, "2026-08-04--card--jsearch-current.md"),
+        `# decision\nAgentRecall version 3.4.41 shipped ${TERM} alpha\n`,
+        "utf-8",
+      );
+
+      const result = await core.journalSearch({ query: `${TERM} alpha beta`, project: PROJECT, limit: 10 });
+      const stale = result.results.find((r) => r.excerpt?.includes("3.5.0"));
+      const current = result.results.find((r) => r.excerpt?.includes("3.4.41"));
+
+      assert.ok(stale, `precondition: the stale (3.5.0) result must surface via journalSearch(); got ${JSON.stringify(result.results)}`);
+      assert.ok(current, `precondition: the current (3.4.41) result must surface via journalSearch(); got ${JSON.stringify(result.results)}`);
+      // NOTE: JournalSearchResult's results[] carries no `id` field of its
+      // own (unlike SmartRecallResultItem — see this function's file header
+      // for why), so `supersededBy` cannot be cross-referenced against a
+      // sibling's `id` WITHIN this same array the way E9 does for
+      // smart_recall. What HIGH-3 requires here — and what this asserts —
+      // is that the annotation is PRESENT (non-empty) in the external JSON
+      // contract at all, which is the exact thing the pre-salvage field-list
+      // map silently dropped.
+      assert.equal(typeof stale.supersededBy, "string", `HIGH-3 FIX: JournalSearchResult's results[] must now carry a non-empty supersededBy string; got ${JSON.stringify(stale)}`);
+      assert.ok(stale.supersededBy.length > 0, "supersededBy must be a non-empty id string, not just present-but-empty");
+      assert.ok(
+        Array.isArray(stale.conflictsWith) && stale.conflictsWith.length > 0,
+        `HIGH-3 FIX: JournalSearchResult's results[] must now carry a non-empty conflictsWith array; got ${JSON.stringify(stale.conflictsWith)}`,
+      );
     });
   });
 });

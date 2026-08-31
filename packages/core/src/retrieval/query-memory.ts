@@ -167,21 +167,36 @@
  * (see `applyContradictionStage` below) — for `journal` and `palace` tiers
  * ONLY (the `insight` tier has no per-item authored-date signal to resolve a
  * direction with, so it is deliberately skipped this wave, not silently
- * inherited). It reuses `helpers/conflict-scan.ts`'s existing version/
- * status/kv token grammar — the SAME grammar `tools-logic/supersession.ts`
- * already reuses for the separate `ar correct` flow — to find, within one
- * tier's own already-scored candidate list, pairs that assert the same
- * fact-key with a different value. A candidate detected as the STALE side
- * of such a pair is DOWN-RANKED (multiplicative score penalty, mirroring
- * `applyHotWindowBoost`'s pattern) and ANNOTATED (`supersededBy`) — it is
- * NEVER removed from the set. This closes part of the reconciliation gap
- * `reports/2026-08-18-eval-redteam.md`'s HIGH-2 finding named (0% of
- * grammar-detectable contradictions were previously surfaced with any
- * corrective signal) for the subset of that gap the existing grammar can
- * actually see — semantic-prose contradictions (that same finding's own
- * PostgreSQL→CockroachDB example) remain out of reach; see
- * `./contradiction.ts`'s header for why, and this wave's report for the
- * follow-up.
+ * inherited). It reuses `helpers/conflict-scan.ts`'s existing version token
+ * grammar to find, within one tier's own already-scored candidate list,
+ * pairs that assert the same fact-key with a different semver value. A
+ * candidate detected as the STALE side of such a pair is DOWN-RANKED
+ * (multiplicative score penalty, mirroring `applyHotWindowBoost`'s pattern)
+ * and ANNOTATED (`supersededBy`) — it is NEVER removed from the set. This
+ * closes part of the reconciliation gap `reports/2026-08-18-eval-redteam.md`'s
+ * HIGH-2 finding named (0% of grammar-detectable contradictions were
+ * previously surfaced with any corrective signal) for the subset of that gap
+ * the existing grammar can actually see — semantic-prose contradictions
+ * (that same finding's own PostgreSQL→CockroachDB example) remain out of
+ * reach; see `./contradiction.ts`'s header for why, and this wave's report
+ * for the follow-up.
+ *
+ * ── W5a SALVAGE (2026-08-31, "## W5a salvage" section of the same report) ──
+ * The original W5a cut also ran `extractStatusTokens`/`extractKVTokens`
+ * through this stage. An independent review found those two branches
+ * false-positive-prone in a way that DEFEATS this stage's own safety intent
+ * (HIGH-1: common phrasing like "status: blocked" vs "status: stuck" — the
+ * SAME status category — got flagged conflicting via the KV branch's literal
+ * value comparison; HIGH-2: generic single-word keys like "priority" gave no
+ * topical protection, flagging topically-unrelated candidates) and found the
+ * `supersededBy`/`conflictsWith` annotation never reached `smart_recall`'s
+ * or `journal_search`'s external contract (HIGH-3, invisible to agents).
+ * FIXED: `./contradiction.ts`'s `grammarConflict` now checks version tokens
+ * ONLY (see that file's header for the full reasoning); the annotation now
+ * threads into `SmartRecallResultItem`/`JournalSearchResult.results` (see
+ * `smart-recall.ts`'s `localRecallSearch` and `journal-search.ts`'s
+ * `journalSearch`). The down-rank+re-sort+never-drop mechanism itself,
+ * proven correct by the original W5a review, is UNCHANGED.
  */
 
 import { readTierCandidates, filterTrusted, type MemoryCandidate } from "./candidates.js";
@@ -275,8 +290,9 @@ export interface QueryMemoryItem {
   /**
    * CONTRADICTION stage (Wave 5a, `./contradiction.ts`) — set ONLY when
    * this item was detected as the STALE side of a same-tier, same-fact-key
-   * grammar conflict (version/status/kv) with a sibling this stage could
-   * confidently order as more current (see `applyContradictionStage`
+   * version-token grammar conflict (status/kv detection removed by the W5a
+   * salvage, 2026-08-31 — see `./contradiction.ts`'s header) with a sibling
+   * this stage could confidently order as more current (see `applyContradictionStage`
    * below). Holds the CURRENT sibling's `id`. Additive: absent on every
    * item unaffected by this stage, including every item from the `insight`
    * tier (deliberately skipped this wave) and every journal/palace item

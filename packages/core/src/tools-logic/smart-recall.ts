@@ -170,6 +170,26 @@ export interface SmartRecallResultItem {
   room?: string;
   date?: string;
   severity?: string;
+  /**
+   * CONTRADICTION stage (Wave 5a, `retrieval/contradiction.ts`) — set ONLY
+   * when this item was detected as the STALE side of a same-tier version-
+   * token conflict with a sibling this result set could confidently order
+   * as more current. Holds the CURRENT sibling's `id`. Additive: absent on
+   * every item unaffected by the stage. W5a salvage (2026-08-31, HIGH-3):
+   * this field is threaded straight through from `QueryMemoryItem` by
+   * `localRecallSearch` below — previously computed but silently dropped by
+   * this interface's field-list map, making the annotation invisible to any
+   * agent reading `smart_recall`'s JSON output even when a contradiction was
+   * detected and the ranking was already affected by it.
+   */
+  supersededBy?: string;
+  /**
+   * CONTRADICTION stage (Wave 5a) — the `id`s of every sibling this item's
+   * text grammar-conflicts with, regardless of whether a stale direction
+   * could be resolved. Additive; see `supersededBy`'s doc comment for the
+   * W5a salvage visibility fix this field shares.
+   */
+  conflictsWith?: string[];
 }
 
 /** A verbatim source attached when a low-confidence top hit was drilled into. */
@@ -385,6 +405,12 @@ export async function localRecallSearch(
     ...(item.room ? { room: item.room } : {}),
     ...(item.date ? { date: item.date } : {}),
     ...(item.severity ? { severity: item.severity } : {}),
+    // W5a salvage (HIGH-3, 2026-08-31): thread the CONTRADICTION stage's
+    // annotation through — this field-list map was previously the exact
+    // place `supersededBy`/`conflictsWith` were silently dropped, even
+    // though they had already, invisibly, changed this item's `score`/rank.
+    ...(item.supersededBy ? { supersededBy: item.supersededBy } : {}),
+    ...(item.conflictsWith && item.conflictsWith.length > 0 ? { conflictsWith: item.conflictsWith } : {}),
   }));
 
   // Graph walk — surface 1-hop linked memories not already in results.

@@ -40,7 +40,39 @@ export function parseSinceDate(since: string): Date {
 }
 
 export interface JournalSearchResult {
-  results: Array<{ date: string; section: string; excerpt: string; line: number }>;
+  results: Array<{
+    date: string;
+    section: string;
+    excerpt: string;
+    line: number;
+    /**
+     * CONTRADICTION stage (Wave 5a, `retrieval/contradiction.ts`) — set ONLY
+     * when this result was detected as the STALE side of a same-tier
+     * version-token conflict with a sibling that could be confidently
+     * ordered as more current. Holds the CURRENT sibling's `id`
+     * (`QueryMemoryItem.id`, stable across queryMemory() calls but not
+     * otherwise exposed on this result shape). Additive — absent when no
+     * conflict was detected. W5a salvage (2026-08-31, HIGH-3): this field
+     * was computed by `queryMemory()`'s journal tier all along but silently
+     * dropped by this function's own field-list map below (the same gap
+     * `smart-recall.ts`'s `localRecallSearch` had) — now threaded through.
+     * NOTE: since `journalSearch()` still applies its own `section` filter
+     * and `limit` slice AFTER this map, a `supersededBy`/`conflictsWith` id
+     * can point at a sibling that this call's OWN filtered/truncated
+     * `results` array no longer contains — this is an accepted, additive-
+     * metadata limitation (see STEP 3 of the W5a salvage report), not a
+     * broken contract: the id is still meaningful against the underlying
+     * `queryMemory()` candidate set, just not guaranteed to be a same-array
+     * cross-reference the way it is for `smart_recall` (which does not
+     * section-filter or truncate before this annotation is attached).
+     */
+    supersededBy?: string;
+    /** CONTRADICTION stage (Wave 5a) — the `id`s of every sibling this
+     *  result's text grammar-conflicts with, regardless of whether a stale
+     *  direction could be resolved. See `supersededBy`'s doc comment for
+     *  the same truncation/section-filter caveat. */
+    conflictsWith?: string[];
+  }>;
   palace_searched: boolean;
   _note?: string;
 }
@@ -117,7 +149,15 @@ export async function journalSearch(input: JournalSearchInput): Promise<JournalS
     // redundant field to the shared QueryMemoryItem shape only this one
     // surface would consume.
     const section = it.title.slice(date.length + 3);
-    return { date, section, excerpt: it.excerpt, line: it.line ?? 0 };
+    return {
+      date, section, excerpt: it.excerpt, line: it.line ?? 0,
+      // W5a salvage (HIGH-3, 2026-08-31): thread the CONTRADICTION stage's
+      // annotation through — see JournalSearchResult["results"]'s own doc
+      // comment for the section-filter/limit truncation caveat this
+      // surface (unlike smart_recall) carries for these two fields.
+      ...(it.supersededBy ? { supersededBy: it.supersededBy } : {}),
+      ...(it.conflictsWith && it.conflictsWith.length > 0 ? { conflictsWith: it.conflictsWith } : {}),
+    };
   });
 
   if (input.section) {
@@ -137,6 +177,21 @@ export async function journalSearch(input: JournalSearchInput): Promise<JournalS
   // scoping. This is an intermediate sort — the join with include_palace
   // results below is re-sorted once more, at the very end, matching the
   // ORIGINAL's single final sort over the combined set.
+  //
+  // W5a salvage STEP 3 note (2026-08-31): this date-descending sort makes
+  // the CONTRADICTION stage's own internal re-sort-by-penalized-score
+  // (query-memory.ts's `applyContradictionStage`) REDUNDANT for this
+  // surface specifically — a down-ranked/stale item is, by construction,
+  // the OLDER-dated one (direction is resolved by date for journal — see
+  // contradiction.ts's DIRECTION rule), so it already sorts to the bottom
+  // here regardless of its penalized score. This is expected, not a bug:
+  // journalSearch()'s own date-desc ordering was always independent of
+  // queryMemory()'s RRF-rank-driven ordering (see this function's Wave 3b
+  // migration notes above). The VALUE this stage adds to journalSearch is
+  // therefore the now-VISIBLE `supersededBy`/`conflictsWith` annotation
+  // (see the map above), not a reorder this surface never needed in the
+  // first place — do not attempt to force the reorder to matter here by
+  // changing this sort's key.
   results.sort((a, b) => b.date.localeCompare(a.date));
   results = results.slice(0, limit);
 

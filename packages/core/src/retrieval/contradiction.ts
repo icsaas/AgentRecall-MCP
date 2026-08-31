@@ -2,6 +2,57 @@
  * retrieval/contradiction.ts — the CONTRADICTION pipeline stage (Wave 5a,
  * 2026-08-31, reports/2026-08-31-pipe-w5a-contradiction-report.md).
  *
+ * ── W5a SALVAGE (2026-08-31, same date, "## W5a salvage" section of the same
+ * report) ── An INDEPENDENT review (separate from — and after — the W5a
+ * code-reviewer pass named below) passed the mechanism (down-rank+annotate+
+ * never-drop, the re-sort→RRF propagation) but found the token grammar's
+ * status/kv branches were false-positive-PRONE in a way that actively
+ * defeats the stage's own safety intent, not merely "wider than ideal":
+ *   - HIGH-1 (safeguard defeat): the status branch extracts categories via
+ *     `extractStatusTokens`, which maps "blocked"/"stuck" to the SAME
+ *     category (both → "blocked") — so category-EQUIVALENT common phrasing
+ *     ("status: blocked" vs "status: stuck", genuinely the same fact) should
+ *     never conflict. It didn't, by that safeguard's own design — but the
+ *     status branch is un-keyed (see below) and the KV branch's own separate
+ *     "key: value" extraction treats "status" as a literal KV KEY with
+ *     "blocked"/"stuck" as different raw VALUES, flagging a conflict the
+ *     status-category-equivalence check was specifically built to prevent.
+ *     Two branches reusing overlapping vocabulary defeated each other.
+ *   - HIGH-2 (generic-key false positive): both the kv branch and (to a
+ *     narrower degree) the version branch key off whatever single word
+ *     immediately precedes the value — "priority: high" (a marketing
+ *     decision) vs "priority: low" (an unrelated cleanup task) share the
+ *     generic key `priority` and got flagged conflicting despite being
+ *     about entirely different topics; "key match" gave no topical
+ *     protection at all for common one-word keys.
+ *   - HIGH-3 (invisible annotation): `supersededBy`/`conflictsWith` never
+ *     reached `SmartRecallResultItem`/`JournalSearchResult.results` — fixed
+ *     separately, see smart-recall.ts's `localRecallSearch` and
+ *     journal-search.ts's `journalSearch` field-list maps.
+ *
+ * FIX (this file): restrict `grammarConflict` to `extractVersionTokens`
+ * ONLY — status and kv detection are REMOVED from this module entirely
+ * (not just gated/pre-filtered). Semver (`\d+\.\d+\.\d+`) is a much
+ * narrower, more self-describing pattern than a bare "word: word" or
+ * status-category match — a shared key + differing semver value is a
+ * strong, low-false-positive signal of a genuine version supersession, and
+ * removing the other two branches removes HIGH-1 (the category-vs-KV
+ * cross-branch defeat cannot happen when the KV branch does not exist) and
+ * the dominant real-world instance of HIGH-2 (KV keys off ANY generic
+ * one-word label — "priority", "status", "mode", "env" — a pattern that
+ * recurs constantly in prose; a version-shaped `\d+\.\d+\.\d+` collision
+ * between two topically-unrelated candidates is comparatively rare, though
+ * not literally impossible — e.g. a shared generic key like "step 1.2.3" vs
+ * "step 5.6.7" — an acknowledged, narrower residual risk, not claimed to be
+ * zero). `extractStatusTokens`/`extractKVTokens` remain exported from
+ * `helpers/conflict-scan.ts` and are UNCHANGED there — `conflict-scan.ts`'s
+ * own `scanForConflicts` (the separate smart-remember pre-save warning flow)
+ * and `tools-logic/supersession.ts`'s `compareForConflicts` (the separate
+ * `ar correct` CorrectionRecord flow) both still use all three extractors;
+ * this restriction applies ONLY to this module's pairwise same-tier
+ * retrieval-time comparison, not to those other two, structurally distinct
+ * consumers.
+ *
  * WHY THIS IS ITS OWN MODULE, not a function inside query-memory.ts: mirrors
  * `retrieval/scope.ts`'s own precedent — a small, dependency-light, pure
  * comparator that query-memory.ts (this wave) consumes, and that a later
@@ -11,31 +62,24 @@
  * cycle this pattern avoids).
  *
  * WHAT THIS DOES NOT DO (scope, read the eval fixtures before extending):
- * this comparator reuses ONLY `helpers/conflict-scan.ts`'s existing token
- * grammar (semver version tokens, status-category words, "key: value"/"key
- * is value" pairs) — the SAME grammar `tools-logic/supersession.ts`'s
- * `compareForConflicts` already reuses for the separate CorrectionRecord
- * flow (this module does NOT call supersession.ts — see this wave's report,
- * STEP 0/ASSERT_INVARIANTS, for why: supersession.ts's functions are bound
- * to `CorrectionRecord`, a different, `ar correct`-store-specific shape;
- * calling them here would be reaching across an unrelated subsystem for no
- * reason when the underlying grammar is a public export of conflict-scan.ts
- * either way). It does NOT detect arbitrary semantic-prose contradictions
- * ("we fully migrated OFF Postgres to CockroachDB" vs "we use Postgres") —
- * confirmed empirically against the redteam eval fixture
- * (reports/2026-08-18-eval-redteam.md HIGH-2) while resolving this wave's
- * pre-loaded Challenge A: none of the three token extractors produce a
- * matching key with differing values for that pair (no version, no status
- * word, no `key: value`/`key is value` construction shared between the two
- * sentences). Prose-semantic contradiction detection is a genuinely harder,
- * separate problem (conflict-scan.ts's own header already says so) and is
- * explicitly OUT of this wave's scope — see the wave report's "prose-
- * semantic gap" follow-up section, not silently absorbed into this grammar.
+ * this comparator reuses ONLY `helpers/conflict-scan.ts`'s `extractVersionTokens`
+ * semver extractor (post-salvage — see above; status/kv were removed, not
+ * merely descoped from the start). It does NOT detect arbitrary
+ * semantic-prose contradictions ("we fully migrated OFF Postgres to
+ * CockroachDB" vs "we use Postgres") — confirmed empirically against the
+ * redteam eval fixture (reports/2026-08-18-eval-redteam.md HIGH-2) while
+ * resolving this wave's pre-loaded Challenge A: the version extractor
+ * produces no matching key with differing values for that pair at all (no
+ * version numbers appear in either sentence). Prose-semantic contradiction
+ * detection is a genuinely harder, separate problem (conflict-scan.ts's own
+ * header already says so) and is explicitly OUT of this wave's scope — see
+ * the wave report's "prose-semantic gap" follow-up section, not silently
+ * absorbed into this grammar.
  *
  * ALGORITHM: pairwise, O(n²) over one tier's already-scored item list (n is
  * a per-tier result count, bounded by `perTierLimit`, never the full corpus).
  * For every pair (i, j):
- *   1. GRAMMAR CHECK — same key across version/status/kv tokens, different
+ *   1. GRAMMAR CHECK — same key across version tokens, different semver
  *      value → conflict. Symmetric (order of i/j does not matter for
  *      whether a conflict exists, only for which side is stale — see 2).
  *   2. DIRECTION — decide which side is stale, if determinable at all:
@@ -66,11 +110,11 @@
  * back the exact same candidate set it passed in.
  */
 
-import {
-  extractVersionTokens,
-  extractStatusTokens,
-  extractKVTokens,
-} from "../helpers/conflict-scan.js";
+// W5a salvage (2026-08-31): extractStatusTokens/extractKVTokens intentionally
+// NOT imported here anymore — see this file's header for HIGH-1/HIGH-2 and
+// why the fix removes these two branches at the root rather than adding a
+// topical pre-filter on top of them.
+import { extractVersionTokens } from "../helpers/conflict-scan.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,68 +171,32 @@ export interface ContradictionResult {
 // not fork or reimplement the grammar (see this file's header).
 // ---------------------------------------------------------------------------
 
-/** True iff `a` and `b` share at least one grammar-extracted key with a
- *  differing value (version, status-category, or key-value). Symmetric. */
+/**
+ * True iff `a` and `b` share a version-extracted key with a differing semver
+ * value. Symmetric.
+ *
+ * W5a SALVAGE (2026-08-31): this function previously also checked
+ * status-category tokens and generic key-value tokens (`extractStatusTokens`/
+ * `extractKVTokens`) — REMOVED per an independent review's HIGH-1/HIGH-2
+ * findings (see this file's header for the full reasoning): the status
+ * branch's un-keyed, both-directions category comparison could be defeated
+ * by the KV branch treating the SAME words ("status: blocked" vs "status:
+ * stuck") as differing raw values even though the status branch's own
+ * category map treats them as equivalent (HIGH-1); and the KV branch's
+ * generic single-word key ("priority", "mode", "env", ...) gave no topical
+ * protection at all, flagging topically-unrelated candidates that merely
+ * happened to share a common label (HIGH-2). Neither branch is reinstated
+ * with a topical pre-filter this wave — that would be new, unscoped grammar
+ * behavior; the fix is to not run the two branches at all, not to patch them.
+ */
 function grammarConflict(a: ContradictionItem, b: ContradictionItem): boolean {
-  // 1. Version tokens — same key, different semver value.
   const av = extractVersionTokens(a.text);
-  if (av.size > 0) {
-    const bv = extractVersionTokens(b.text);
-    for (const [key, val] of av) {
-      const bval = bv.get(key);
-      if (bval && bval !== val) return true;
-    }
+  if (av.size === 0) return false;
+  const bv = extractVersionTokens(b.text);
+  for (const [key, val] of av) {
+    const bval = bv.get(key);
+    if (bval && bval !== val) return true;
   }
-
-  // 2. Status tokens — compare CATEGORIES, not raw words (mirrors
-  // conflict-scan.ts's scanForConflicts / supersession.ts's
-  // compareForConflicts: "blocked" and "stuck" are the same category and
-  // must not be flagged as conflicting). Checked in both directions since
-  // there is no fixed "new vs existing" side for a same-tier pairwise scan
-  // — unlike version/kv tokens (which require a matching KEY before values
-  // are ever compared), status tokens have no per-fact key at all, so this
-  // is a WIDER match than version/kv: two same-tier candidates that each
-  // merely mention a DIFFERENT, topically UNRELATED status word (e.g. "the
-  // demo is done" vs "the backend is broken") get flagged conflicting even
-  // though they assert nothing about the same fact (independent code
-  // review, W5a, 2026-08-31 — see this wave's report for the fixture that
-  // proves this precisely). This is also a strict widening of conflict-
-  // scan.ts's own original one-directional semantics (`scanForConflicts`
-  // only checks "does EXISTING have a category NEW lacks", gated on NEW
-  // having >=1 status word at all) into a symmetric, gate-free check — a
-  // deliberate consequence of reusing the SAME grammar for a genuinely
-  // different comparison shape (pairwise among N same-tier candidates, not
-  // one-new-vs-five-recalled), not a fork of it. NOT fixed with an
-  // invented topical-relevance pre-filter this wave — that would be new,
-  // unscoped grammar behavior beyond "reuse the existing extractors as-is"
-  // (this wave's ASSERT_INVARIANTS). The blast radius is bounded by this
-  // stage's own hard invariant instead: a false-positive status match can
-  // only ever ANNOTATE + down-rank, never drop, a candidate — see
-  // query-memory-pipeline.test.mjs PART E's dedicated coverage for both the
-  // genuine-flip case and this documented over-inclusive case, proving the
-  // safety net holds even when the match itself is topically wrong. A
-  // topical/shared-keyword pre-check (mirroring version/kv's implicit key
-  // scoping) is a reasonable follow-up if this proves too noisy in
-  // practice, not implemented here.
-  const asTokens = extractStatusTokens(a.text);
-  const bsTokens = extractStatusTokens(b.text);
-  if (asTokens.size > 0 && bsTokens.size > 0) {
-    const aCats = new Set(asTokens.values());
-    const bCats = new Set(bsTokens.values());
-    for (const cat of aCats) if (!bCats.has(cat)) return true;
-    for (const cat of bCats) if (!aCats.has(cat)) return true;
-  }
-
-  // 3. Key-value tokens — same key, different value.
-  const akv = extractKVTokens(a.text);
-  if (akv.size > 0) {
-    const bkv = extractKVTokens(b.text);
-    for (const [key, val] of akv) {
-      const bval = bkv.get(key);
-      if (bval && bval !== val) return true;
-    }
-  }
-
   return false;
 }
 
