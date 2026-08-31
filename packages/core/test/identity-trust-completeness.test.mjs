@@ -190,11 +190,6 @@ const ALLOWLIST_B = {
   "helpers/journal-files.ts::readRecentCaptures":
     "reads capture-log (`--capture--`/`-log.md`) content only — the SAME distinct file class " +
     "as hasCaptureLogs above, never the `--card--` naming distillOneSession writes.",
-  "retrieval/query-memory.ts::readLegacyJournalCandidates":
-    "(Wave 2, 2026-08-30, plywood SOP ecbd4351) sets `untrusted:false` deliberately (documented " +
-    "inline): this is a small, self-contained legacy-directory read of pre-package content that " +
-    "predates the working-memory-rescue mechanism's existence entirely, so it structurally cannot " +
-    "carry a `source: working-memory-rescue` tag.",
   "storage/archive-prune.ts::pruneRawArchive":
     "operates exclusively on archiveRawDir() (the raw hook-archive tier, `${date}--${sid}.md`) — " +
     "writeSessionCard/distillOneSession write ONLY to journalDir()'s `${date}--card--${sid}.md`, a " +
@@ -981,7 +976,7 @@ describe("identity-trust completeness — multi-region residual check (2026-08-3
     );
   });
 
-  it("fetchVerbatim (drill-down.ts): the journal branch is choked; the archive + palace regions are allowlisted SAFE by structural argument, not by a choke call", async () => {
+  it("fetchVerbatim (drill-down.ts): the journal AND palace branches are code-enforced choked; only the archive region remains allowlisted SAFE by structural argument, not by a choke call", async () => {
     const file = path.join(CORE_SRC, "tools-logic", "drill-down.ts");
     const result = await extractFunctionIfBranches(file, "fetchVerbatim", [
       { label: "journal", conditionPattern: /key\.kind\s*===\s*"journal"/ },
@@ -996,19 +991,202 @@ describe("identity-trust completeness — multi-region residual check (2026-08-3
       /\breadJournalFile\(/.test(journal.text) || CHOKE_PATTERN.test(journal.text),
       `fetchVerbatim's journal branch must call readJournalFile (now safe-by-default) or the choke directly — this is gap #2. Region text:\n${journal.text}`,
     );
-    // Archive + palace (residual) regions are DELIBERATELY not choked —
-    // verified SAFE by structural argument (archive: distillOneSession never
-    // writes to archiveRawDir(); palace: a caller-specified single file, not
-    // a room glob) — see this wave's PR report. Assert the ABSENCE of a raw
-    // choke-free readFileSync is not the bar here; the bar is that this
-    // reasoning was actually re-verified, which the PR report + this comment
-    // constitute. No code assertion beyond "these regions still exist and
-    // still read via archiveRawDir()/palaceDir()" — a structural-safety
-    // argument cannot be mechanically checked without re-deriving the same
-    // provenance analysis the human/LLM review already did (see
-    // fence-completeness.test.mjs's own header comment on why content-
-    // provenance judgment calls are out of scope for mechanical enforcement).
+    // Palace (the residual — no marker was requested for it, so it lands in
+    // `result.residual` alongside the function's shared preamble/catch) —
+    // PRE-SHIP RED-TEAM FIX (Break #2, 2026-09-01, wave/pipe-w5fix STEP 2):
+    // this branch used to be allowlisted "SAFE by structural argument"
+    // (caller-specified single file, never a room glob) — an argument about
+    // CALLERS of this PUBLIC export, not an enforced property of the
+    // function's own body. It now calls `isRescueSourcedContent` directly
+    // before returning, mirroring the journal branch's readJournalFile choke
+    // immediately above — code-enforced, not caller-discipline-dependent.
+    assert.ok(
+      CHOKE_PATTERN.test(result.residual),
+      `fetchVerbatim's residual (the palace branch) must now call isRescueSourcedContent directly (STEP 2 fix, pre-ship red-team Break #2) — the old "structural argument" allowlist is retired. Residual text:\n${result.residual}`,
+    );
+    // Archive region remains allowlisted SAFE by structural argument
+    // (unchanged, out of this fix's scope — distillOneSession never writes
+    // to archiveRawDir(), only archiveSession does — see this wave's PR
+    // report). Assert the ABSENCE of a raw choke-free readFileSync is not
+    // the bar here; the bar is that this reasoning was actually re-verified,
+    // which the PR report + this comment constitute. No code assertion
+    // beyond "this region still exists and still reads via archiveRawDir()"
+    // — a structural-safety argument cannot be mechanically checked without
+    // re-deriving the same provenance analysis the human/LLM review already
+    // did (see fence-completeness.test.mjs's own header comment on why
+    // content-provenance judgment calls are out of scope for mechanical
+    // enforcement).
     assert.ok(/archiveRawDir\(/.test(archive.text), "sanity: the archive branch must still read via archiveRawDir() — if this moved, the SAFE argument needs re-verification");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// PART H — hardcoded-`untrusted:false` completeness check (pre-ship
+// red-team fix, STEP 3, "cure-the-cure", 2026-09-01, wave/pipe-w5fix).
+//
+// THE HOLE THIS CLOSES: `retrieval/query-memory.ts::readLegacyJournalCandidates`
+// hardcoded `untrusted: false` on every candidate instead of deriving it from
+// `isRescueSourcedContent` (see STEP 1 of this wave's fix) — a genuine
+// CRITICAL rescue-quarantine leak. PART B's `RISK_PATTERN`/`READ_PATTERN`
+// scanner only caught it BY ACCIDENT: the function's own leading JSDoc
+// comment happened to mention `journalDirs(` in prose (documenting a
+// DIFFERENT function's traversal it was modeled on, not calling it), which
+// is included in a unit's `.text` because `extractTopLevelUnits` slices from
+// `stmt.pos` (leading trivia included) — delete or reword that comment and
+// the SAME vulnerable function would have gone completely undiscovered by
+// PART B, with its ALLOWLIST_B entry (which read "sets `untrusted:false`
+// deliberately... structurally cannot carry" the tag) accepted at face
+// value, exactly the "hardcoding reads as safe" failure this PART exists to
+// stop reproducing. This is a DIFFERENT, comment-independent signal:
+// hardcoding the literal `untrusted: false` object-literal value in a unit
+// that ALSO reads file content (`readFileSync(`) and never calls the choke
+// anywhere in its own body is ITSELF the vulnerability shape — regardless of
+// which storage-tier helper (`journalDirs`/`archiveRawDir`/`palaceDir`/
+// `listRooms`/`getLegacyRoot`/none of the above) the unit used to find that
+// content.
+//
+// PATTERN CHOICE: `/\buntrusted\s*:\s*false\b/` matches ONLY an
+// object-literal property assignment (`untrusted: false,` inside a
+// `MemoryCandidate`/similar object push) — never an assignment expression
+// (`entry.untrusted = false`, used legitimately by resurrect.ts's
+// `getOrCreate` as a mutable starting default later corrected by
+// `entry.untrusted = true` once a rescue tag is seen; that shape uses `=`,
+// not `:`, so it never matches). Verified empirically against the real repo
+// (2026-09-01): the ONLY two occurrences of the literal `untrusted:\s*false`
+// shape in packages/core/src are `retrieval/query-memory.ts`'s
+// `readLegacyJournalCandidates` (the bug this wave fixes) and
+// `tools-logic/resurrect.ts`'s `getOrCreate` (a SEPARATE, safe unit with no
+// `readFileSync` of its own in its body — never flagged by this check, see
+// the non-vacuity test below for the discriminator proof).
+// ─────────────────────────────────────────────────────────────────────────
+
+const HARDCODED_UNTRUSTED_FALSE_PATTERN = /\buntrusted\s*:\s*false\b/;
+
+/**
+ * @param {string} srcRoot
+ * @param {string[]} effectiveWrappers
+ * @returns {{file: string, unit: string}[]} every UNIT that hardcodes a
+ *   literal `untrusted: false` object-literal property AND also reads file
+ *   content (`readFileSync(`) AND never calls the shared choke (directly, or
+ *   via a live-verified trusted wrapper) anywhere in its own body. Unlike
+ *   `scanForUnchokedJournalReaders`/`scanForUnchokedPalaceRoomReaders` above,
+ *   this scanner does NOT gate on `RISK_PATTERN`/`PALACE_RISK_PATTERN` first
+ *   — a unit reaching this vulnerability shape via `getLegacyRoot()` (or any
+ *   future storage-tier helper this repo hasn't invented yet) must still be
+ *   caught; gating on today's known helper names would just reproduce the
+ *   comment-dependent accident this PART exists to remove.
+ */
+async function scanForHardcodedUntrustedFalseReaders(srcRoot, effectiveWrappers) {
+  const results = [];
+  for (const full of walkTsFiles(srcRoot)) {
+    const text = fs.readFileSync(full, "utf-8");
+    if (!(HARDCODED_UNTRUSTED_FALSE_PATTERN.test(text) && READ_PATTERN.test(text))) continue;
+    const rel = path.relative(srcRoot, full);
+    const units = await extractTopLevelUnits(full);
+    for (const u of units) {
+      if (
+        HARDCODED_UNTRUSTED_FALSE_PATTERN.test(u.text) &&
+        READ_PATTERN.test(u.text) &&
+        !isChokedUnit(u.text, effectiveWrappers)
+      ) {
+        results.push({ file: rel, unit: u.id });
+      }
+    }
+  }
+  return results;
+}
+
+describe("identity-trust completeness — hardcoded untrusted:false completeness check (STEP 3, pre-ship red-team fix, cure-the-cure, 2026-09-01)", () => {
+  it("no UNIT in packages/core/src hardcodes a literal `untrusted: false` while also reading file content, without deriving it from the shared choke — RED before STEP 1's fix, GREEN after", async () => {
+    const effectiveWrappers = await computeEffectiveTrustedWrappers();
+    const violations = await scanForHardcodedUntrustedFalseReaders(CORE_SRC, effectiveWrappers);
+    assert.deepEqual(
+      violations,
+      [],
+      `${violations.length} unit(s) hardcode a literal "untrusted: false" while also reading file content, with no choke call anywhere in their own body: ` +
+      `${violations.map((v) => `${v.file}::${v.unit}`).join(", ")}. Every candidate's \`untrusted\` flag must be DERIVED from isRescueSourcedContent(content) ` +
+      `(mirroring retrieval/candidates.ts's sibling readers), never hardcoded — a hardcoded false silently defeats filterTrusted() for that entire source, ` +
+      `exactly the CRITICAL-1-class rescue-leak this check exists to catch before ship.`,
+    );
+  });
+
+  describe("non-vacuity", () => {
+    let fixtureRoot;
+    before(() => { fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ar-p0-trustclass-hardcoded-untrusted-fixture-")); });
+    after(() => { fs.rmSync(fixtureRoot, { recursive: true, force: true }); });
+
+    it("RED: a synthetic reader that hardcodes untrusted:false while reading file content (via a made-up helper this scanner has never heard of) IS flagged, proving the check is not gated on today's known RISK_PATTERN helper names", async () => {
+      const fixtureFile = path.join(fixtureRoot, "retrieval", "hypothetical-new-tier.ts");
+      fs.mkdirSync(path.dirname(fixtureFile), { recursive: true });
+      fs.writeFileSync(
+        fixtureFile,
+        [
+          `import * as fs from "node:fs";`,
+          `import { getSomeFutureRoot } from "../made-up-helper.js";`,
+          `export function readHypotheticalTierCandidates(project) {`,
+          `  const root = getSomeFutureRoot();`,
+          `  const content = fs.readFileSync(root + "/" + project + ".md", "utf-8");`,
+          `  return [{ content, untrusted: false }];`,
+          `}`,
+        ].join("\n"),
+        "utf-8",
+      );
+      const violations = await scanForHardcodedUntrustedFalseReaders(fixtureRoot, []);
+      const flagged = violations.find((v) => v.unit === "readHypotheticalTierCandidates");
+      assert.ok(flagged, "a hardcoded untrusted:false reader must be flagged even when reached via a storage-tier helper this scanner has never seen before (comment-independent, unlike the RISK_PATTERN-based scanners above)");
+    });
+
+    it("GREEN: the SAME fixture, fixed to derive untrusted from the choke, clears", async () => {
+      const fixtureFile = path.join(fixtureRoot, "retrieval", "hypothetical-new-tier.ts");
+      fs.writeFileSync(
+        fixtureFile,
+        [
+          `import * as fs from "node:fs";`,
+          `import { getSomeFutureRoot } from "../made-up-helper.js";`,
+          `import { isRescueSourcedContent } from "../helpers/journal-filter.js";`,
+          `export function readHypotheticalTierCandidates(project) {`,
+          `  const root = getSomeFutureRoot();`,
+          `  const content = fs.readFileSync(root + "/" + project + ".md", "utf-8");`,
+          `  return [{ content, untrusted: isRescueSourcedContent(content) }];`,
+          `}`,
+        ].join("\n"),
+        "utf-8",
+      );
+      const violations = await scanForHardcodedUntrustedFalseReaders(fixtureRoot, []);
+      const flagged = violations.find((v) => v.unit === "readHypotheticalTierCandidates");
+      assert.equal(flagged, undefined, "once untrusted is derived from the choke, this unit must no longer be flagged");
+    });
+
+    it("non-vacuity (discriminator): a unit that hardcodes untrusted:false but does NOT read file content (e.g. resurrect.ts's real getOrCreate shape — a mutable default later corrected elsewhere) is NOT flagged", async () => {
+      const fixtureFile = path.join(fixtureRoot, "tools-logic", "map-default.ts");
+      fs.mkdirSync(path.dirname(fixtureFile), { recursive: true });
+      fs.writeFileSync(
+        fixtureFile,
+        [
+          `export function getOrCreate(map, key) {`,
+          `  let entry = map.get(key);`,
+          `  if (!entry) {`,
+          `    entry = { untrusted: false };`,
+          `    map.set(key, entry);`,
+          `  }`,
+          `  return entry;`,
+          `}`,
+        ].join("\n"),
+        "utf-8",
+      );
+      const violations = await scanForHardcodedUntrustedFalseReaders(fixtureRoot, []);
+      assert.equal(violations.find((v) => v.unit === "getOrCreate"), undefined, "a hardcoded untrusted:false with no readFileSync in the SAME unit must not be flagged — it never reads content of its own to mis-trust");
+    });
+
+    it("sanity: the real repo's only OTHER hardcoded untrusted:false site (resurrect.ts's getOrCreate) is confirmed NOT flagged by this exact discriminator, so this check's precondition for zero real violations is not accidental", async () => {
+      const effectiveWrappers = await computeEffectiveTrustedWrappers();
+      const violations = await scanForHardcodedUntrustedFalseReaders(CORE_SRC, effectiveWrappers);
+      assert.equal(
+        violations.find((v) => v.file === path.join("tools-logic", "resurrect.ts") && v.unit === "getOrCreate"),
+        undefined,
+        "resurrect.ts's getOrCreate must not be flagged (no readFileSync in its own body) — if this ever fires, getOrCreate's shape changed and needs re-review, not a silent scanner change",
+      );
+    });
   });
 });
 
@@ -1368,6 +1546,30 @@ describe("destination-proof — a hijacked rescue card cannot outrank/impersonat
     const rescueDate = writeRescueTaggedCard(REAL_SLUG, "gap2-hijack-001", "SOLO_VERBATIM_HIJACK");
     const result = core.fetchVerbatim(REAL_SLUG, { kind: "journal", date: rescueDate });
     assert.equal(result, null, `fetchVerbatim({kind:"journal"}) must return null for a rescue-tagged-only date, never fabricate a verbatim source; got ${JSON.stringify(result)}`);
+  });
+
+  // ── Pre-ship red-team fix (Break #2, 2026-09-01, wave/pipe-w5fix STEP 2) ──
+  // fetchVerbatim's "palace" branch used to do a raw fs.readFileSync with NO
+  // trust check at all (allowlisted "SAFE by structural argument" — an
+  // argument about who calls this PUBLIC export, not an enforced property of
+  // its own body). This is the destination-proof for the fix: RED before it
+  // (the hijacked room file's content would be returned verbatim), GREEN
+  // after (null, the same "nothing genuine found" contract a missing file
+  // already gets), with a genuine sibling proving the null isn't vacuous.
+  it("fetchVerbatim's palace branch never returns a rescue-tagged room file's content for a resurrect()-style verbatim fetch (STEP 2 fix)", async () => {
+    core.ensurePalaceInitialized(REAL_SLUG);
+    writeRescueTaggedRoomFile(REAL_SLUG, "decisions", "solo-verbatim-hijack.md", "SOLO_PALACE_VERBATIM_HIJACK");
+    const hijackResult = core.fetchVerbatim(REAL_SLUG, { kind: "palace", room: "decisions", file: "solo-verbatim-hijack" });
+    assert.equal(hijackResult, null, `fetchVerbatim({kind:"palace"}) must return null for a rescue-tagged room file, never fabricate a verbatim source; got ${JSON.stringify(hijackResult)}`);
+
+    // Non-vacuity: a genuine (non-rescue-tagged) sibling file, fetched the
+    // exact same way, DOES resolve — proves the null above is a real trust
+    // decision, not "fetchVerbatim's palace branch is broken/always null".
+    const roomDir = path.join(TEST_ROOT, "projects", REAL_SLUG, "palace", "rooms", "decisions");
+    fs.writeFileSync(path.join(roomDir, "solo-verbatim-genuine.md"), `# ${GENUINE_TERM}\n`, "utf-8");
+    const genuineResult = core.fetchVerbatim(REAL_SLUG, { kind: "palace", room: "decisions", file: "solo-verbatim-genuine" });
+    assert.ok(genuineResult?.found, `fetchVerbatim({kind:"palace"}) must still resolve a genuine sibling file; got ${JSON.stringify(genuineResult)}`);
+    assert.ok(genuineResult.text.includes(GENUINE_TERM), `the genuine result's text must include the real content; got ${JSON.stringify(genuineResult)}`);
   });
 
   // ── Wave 3a destination-proofs (P0 palace-room KNOWN-GAP cluster closure,

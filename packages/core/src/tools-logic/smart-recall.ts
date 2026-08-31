@@ -179,8 +179,14 @@ export interface SmartRecallResultItem {
    * this field is threaded straight through from `QueryMemoryItem` by
    * `localRecallSearch` below — previously computed but silently dropped by
    * this interface's field-list map, making the annotation invisible to any
-   * agent reading `smart_recall`'s JSON output even when a contradiction was
-   * detected and the ranking was already affected by it.
+   * agent reading `smart_recall`'s JSON output.
+   *
+   * ANNOTATE-ONLY (pre-ship red-team fix, STEP 4a, 2026-09-01): a
+   * `supersededBy` item's `score`/rank is NEVER changed by the contradiction
+   * stage — see `retrieval/query-memory.ts`'s `applyContradictionStage` for
+   * why the original down-rank was removed (a false-positive grammar match
+   * used to actively INVERT ranking; now it is, at worst, a harmless extra
+   * annotation).
    */
   supersededBy?: string;
   /**
