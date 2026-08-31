@@ -108,13 +108,78 @@
  * input array itself (that is query-memory.ts's stage's job, immediately
  * downstream). A caller that ignores this module's output entirely gets
  * back the exact same candidate set it passed in.
+ *
+ * ── HIGH-PRECISION GRAMMAR (pre-ship red-team fix, STEP 4b, 2026-09-01,
+ * wave/pipe-w5fix — correctness red-team, reports/2026-09-01-pipe-w5fix-
+ * report.md) ──
+ * The W5a-salvage grammar above (line ~45-46) already NAMED "step 1.2.3 vs
+ * step 5.6.7" as "an acknowledged, narrower residual risk, not claimed to be
+ * zero" — a second, independent (correctness, not security) red-team then
+ * PROVED that risk is much wider and actively harmful, not narrow: the
+ * plain `helpers/conflict-scan.ts` `extractVersionTokens` extractor's
+ * `(?:v|@|version\s+)?` marker is OPTIONAL, so ANY bare `N.N.N`-shaped
+ * digit run gets treated as a version — which false-positives on:
+ *   - IP addresses: "at 10.0.0.1" / "at 10.0.1.5" (the first 3 octets of a
+ *     dotted-quad ARE a valid `\d+\.\d+\.\d+` match on their own).
+ *   - dot-formatted dates: "08.15.2026" / "08.16.2026" (MM.DD.YYYY is
+ *     structurally IDENTICAL to a semver's `\d+\.\d+\.\d+` shape — nothing
+ *     about the digits themselves can distinguish a date from a version).
+ *   - dotted step/section numbers: "step 1.2.3" / "step 5.6.7".
+ * Combined with the ORIGINAL (pre-STEP-4a) down-rank+re-sort mechanism, a
+ * false-positive match like this didn't just add noise — it actively
+ * INVERTED ranking, demoting a correct, unrelated fact below a weaker match.
+ * STEP 4a (query-memory.ts's `applyContradictionStage`) already made a false
+ * positive here harmless (annotate-only, never reorders/rescores) — this
+ * fix is the SECOND, independent layer: shrink how often the false
+ * positive fires AT ALL, so even the harmless annotation is rare and
+ * meaningful rather than routinely wrong.
+ *
+ * `extractHighPrecisionVersionTokens` below is a LOCAL, module-scoped
+ * extractor — a modified copy of `extractVersionTokens`'s regex, NOT an
+ * edit to the shared `helpers/conflict-scan.ts` export. `extractVersionTokens`
+ * itself is UNCHANGED and remains exactly as permissive as before for its
+ * OTHER two callers (`conflict-scan.ts`'s own `scanForConflicts` — the
+ * smart-remember pre-save warning flow — and `tools-logic/supersession.ts`'s
+ * `compareForConflicts` — the `ar correct` CorrectionRecord flow), which are
+ * structurally distinct consumers this fix's scope (the retrieval area) does
+ * not touch and whose own false-positive tolerance was never in question
+ * here (see this file's original header, "FIX (this file)", for why
+ * `contradiction.ts` choosing a narrower grammar than `conflict-scan.ts`
+ * offers was already the file's own precedent).
+ *
+ * THE TIGHTENING: require an explicit version marker (`v`, `@`, `ver`,
+ * `version`, or `#`) IMMEDIATELY adjacent to the digits, AND reject a
+ * trailing 4th dot-group (`(?!\.\d)`, an IPv4-shape defense-in-depth layered
+ * on top of the marker requirement, in case a marker-adjacent IP ever
+ * occurs, e.g. "v10.0.0.1"). Neither an IP address, a plain date, nor a
+ * bare "step N.N.N" carries any of these markers in ordinary prose, so all
+ * three false-positive classes above no longer extract a token at all —
+ * verified empirically (node REPL, this wave's own report) against every
+ * named case. The real L1-C1 case ("AgentRecall version 3.5.0" / "AgentRecall
+ * version 3.4.41") keeps working: the word "version" IS the marker. See the
+ * PART E test suite (`query-memory-pipeline.test.mjs`) for the fixture-level
+ * proof of both the false-positive exclusions and the still-detected real
+ * case.
+ *
+ * ACCEPTED RECALL LOSS (code-review LOW note, 2026-09-01, not a regression —
+ * precision over recall is this fix's explicit brief): the `(?!\.\d)`
+ * IPv4-shape guard also excludes a genuine 4-COMPONENT version string (e.g.
+ * a Windows-style "3.5.0.1" vs "3.5.0.2") — the same lookahead cannot tell
+ * "this is a 4-octet IP" from "this is a 4-part semver" any more than the
+ * plain extractor's digits alone could tell a date from a version. AgentRecall's
+ * own versioning (and this stage's own worked example) is 3-part, so this is
+ * a narrow, acceptable trade — a missed 4-component version conflict decays
+ * away naturally (recency still favors the newer mention); a false-positive
+ * IP match would not have.
  */
 
 // W5a salvage (2026-08-31): extractStatusTokens/extractKVTokens intentionally
 // NOT imported here anymore — see this file's header for HIGH-1/HIGH-2 and
 // why the fix removes these two branches at the root rather than adding a
-// topical pre-filter on top of them.
-import { extractVersionTokens } from "../helpers/conflict-scan.js";
+// topical pre-filter on top of them. `extractVersionTokens` itself is also
+// no longer imported as of the STEP 4b high-precision fix (2026-09-01) —
+// see `extractHighPrecisionVersionTokens` below, this module's own local
+// (narrower) extractor.
 
 // ---------------------------------------------------------------------------
 // Types
@@ -188,16 +253,63 @@ export interface ContradictionResult {
  * happened to share a common label (HIGH-2). Neither branch is reinstated
  * with a topical pre-filter this wave — that would be new, unscoped grammar
  * behavior; the fix is to not run the two branches at all, not to patch them.
+ *
+ * STEP 4b (2026-09-01): now backed by `extractHighPrecisionVersionTokens`
+ * (this file, below) instead of `helpers/conflict-scan.ts`'s plain
+ * `extractVersionTokens` — see this file's header, "HIGH-PRECISION GRAMMAR",
+ * for the false-positive classes (IP addresses, dot-dates, dotted step
+ * numbers) this closes and why the real L1-C1 version case is unaffected.
  */
 function grammarConflict(a: ContradictionItem, b: ContradictionItem): boolean {
-  const av = extractVersionTokens(a.text);
+  const av = extractHighPrecisionVersionTokens(a.text);
   if (av.size === 0) return false;
-  const bv = extractVersionTokens(b.text);
+  const bv = extractHighPrecisionVersionTokens(b.text);
   for (const [key, val] of av) {
     const bval = bv.get(key);
     if (bval && bval !== val) return true;
   }
   return false;
+}
+
+/**
+ * High-precision version-token extractor — a NARROWER, module-local variant
+ * of `helpers/conflict-scan.ts`'s `extractVersionTokens` (see this file's
+ * header, "HIGH-PRECISION GRAMMAR", for the full false-positive analysis
+ * this exists to close; that shared export is intentionally left UNCHANGED
+ * for its other two callers).
+ *
+ * Differences from the plain extractor:
+ *   1. The version MARKER (`v`, `@`, `ver`, `version`, or `#`) is now
+ *      MANDATORY, not optional — a bare `\d+\.\d+\.\d+` run with no marker
+ *      immediately before it (an IP address, a MM.DD.YYYY date, a "step
+ *      N.N.N" reference) extracts NOTHING. `v` and `#` attach directly to
+ *      the digits (e.g. "v3.5.0", "#3.5.0"); `@` optionally allows
+ *      whitespace (e.g. "pkg@3.5.0" or "pkg @ 3.5.0"); `ver`/`version` are
+ *      whole-word-bounded (so "versioning" never matches as "ver" + "sion")
+ *      and allow an optional trailing "." plus whitespace before the digits
+ *      ("version 3.5.0", "ver. 3.5.0").
+ *   2. `(?!\.\d)` rejects a match immediately followed by a 4th
+ *      dot-digit-group — an IPv4 defense-in-depth layered on top of (1), in
+ *      case a marker ever directly precedes an IP-shaped run (e.g.
+ *      "v10.0.0.1"), which (1) alone would not catch since the marker IS
+ *      present there.
+ * The captured KEY (group 1: the word/token immediately preceding the
+ * marker) is unchanged in spirit from the plain extractor — still "whatever
+ * word sits before the version mention", lowercased and stripped to
+ * `[a-z0-9_-]` by the caller (matching `grammarConflict`'s own usage
+ * pattern, ported verbatim from the plain extractor's callers).
+ */
+function extractHighPrecisionVersionTokens(text: string): Map<string, string> {
+  const result = new Map<string, string>();
+  const pattern = /(\w[\w.-]{0,30}?)\s*(?:v(?=\d)|@\s*|\bver\b\.?\s*|\bversion\b\.?\s*|#\s*)(\d+\.\d+\.\d+)(?!\.\d)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(text)) !== null) {
+    const key = m[1].toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    if (key.length > 0) {
+      result.set(key, m[2]);
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

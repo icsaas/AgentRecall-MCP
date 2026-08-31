@@ -196,7 +196,36 @@
  * threads into `SmartRecallResultItem`/`JournalSearchResult.results` (see
  * `smart-recall.ts`'s `localRecallSearch` and `journal-search.ts`'s
  * `journalSearch`). The down-rank+re-sort+never-drop mechanism itself,
- * proven correct by the original W5a review, is UNCHANGED.
+ * proven correct by the original W5a review, is UNCHANGED as of this note —
+ * see the PRE-SHIP UPDATE immediately below for the wave that DOES change it.
+ *
+ * ── PRE-SHIP RED-TEAM FIXES (2026-09-01, two adversarial red-teams, both
+ * NO-SHIP; wave/pipe-w5fix) ──
+ * Two independent, unrelated fixes landed together in this pass (sequenced to
+ * avoid touching the same function):
+ *   1. SECURITY (CRITICAL): `readLegacyJournalCandidates` below no longer
+ *      hardcodes `untrusted: false` — see that function's own updated doc
+ *      comment for the full CRITICAL-1-class rescue-leak this closed.
+ *   2. CORRECTNESS (W5a contradiction, MEDIUM->fixed): the DOWN-RANK half of
+ *      `applyContradictionStage` (the `CONTRADICTION_PENALTY` multiplier +
+ *      its re-sort) is REMOVED — the stage is now ANNOTATE-ONLY. A second,
+ *      independent (correctness, not security) red-team proved the down-rank
+ *      was net-negative: the version-token grammar false-positives on
+ *      common number-shaped prose that was never a genuine version mention
+ *      (IP addresses, dot-formatted dates, dotted step/section numbers), and
+ *      when it does, the multiplicative penalty INVERTS ranking — demoting a
+ *      correct, unrelated fact below a weaker match purely because both
+ *      happened to contain three dot-separated digit groups. Annotate-only
+ *      makes a false-positive detection harmless (an extra `conflictsWith`
+ *      flag an agent can ignore) instead of rank-corrupting. Paired with a
+ *      HIGH-PRECISION tightening of the grammar itself (`./contradiction.ts`'s
+ *      `grammarConflict` — now requires an explicit version marker adjacent
+ *      to the digits and rejects a 4th trailing dot-group, i.e. an IPv4
+ *      shape) and a RESOLVABLE-annotation fix (`JournalSearchResult.results`
+ *      now carries an additive `id`, mirroring `SmartRecallResultItem`, so
+ *      `supersededBy`/`conflictsWith` are cross-referenceable there too, not
+ *      just for `smart_recall`). See `./contradiction.ts`'s own header for
+ *      the grammar fix's full false-positive-by-false-positive proof.
  */
 
 import { readTierCandidates, filterTrusted, type MemoryCandidate } from "./candidates.js";
@@ -209,6 +238,7 @@ import { recallInsights } from "../palace/insights-index.js";
 import { parseSinceDate } from "../tools-logic/journal-search.js";
 import { CONFIDENCE_FLOOR } from "../tools-logic/confidence.js";
 import { scrubForCloud, fenceMemory } from "../storage/content-guard.js";
+import { isRescueSourcedContent, extractFrontmatterSource } from "../helpers/journal-filter.js";
 import { getLegacyRoot } from "../types.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -296,9 +326,13 @@ export interface QueryMemoryItem {
    * below). Holds the CURRENT sibling's `id`. Additive: absent on every
    * item unaffected by this stage, including every item from the `insight`
    * tier (deliberately skipped this wave) and every journal/palace item
-   * with no detected conflict. A `supersededBy` item ALWAYS also carries a
-   * multiplicatively down-ranked `score` (see `CONTRADICTION_PENALTY`) —
-   * it is NEVER removed from `items`.
+   * with no detected conflict.
+   *
+   * ANNOTATE-ONLY (pre-ship red-team fix, STEP 4a, 2026-09-01): a
+   * `supersededBy` item's `score`/rank is NEVER changed by this stage — see
+   * `applyContradictionStage`'s own doc comment for why the original
+   * down-rank was removed. It is, and always was, NEVER removed from
+   * `items`.
    */
   supersededBy?: string;
   /**
@@ -415,8 +449,22 @@ function keywordExactness(query: string, text: string): number {
   return Math.min(1.0, matches.length / rawWords.length);
 }
 
-/** Simple stable hash for result IDs — ported verbatim from smart-recall.ts. */
-function stableId(source: string, title: string): string {
+/**
+ * Simple stable hash for result IDs — ported verbatim from smart-recall.ts.
+ *
+ * Exported (STEP 4c, pre-ship red-team fix, 2026-09-01) so
+ * `tools-logic/journal-search.ts`'s `journalSearch()` can mint the SAME
+ * kind of stable id for its own `include_palace` branch's locally-scanned
+ * rows (which never become `QueryMemoryItem`s — that branch bypasses
+ * queryMemory() entirely, see `journalSearch`'s own comment) — giving
+ * `JournalSearchResult.results` a real `id` on EVERY row, not just the
+ * primary journal-tier ones, without forking a second hash implementation.
+ * journal-search.ts already imports `queryMemory`/`parseSinceDate` in a
+ * pre-existing circular pair with this module (this file imports
+ * `parseSinceDate` FROM journal-search.ts); adding this export extends that
+ * SAME already-tolerated cycle, not a new one.
+ */
+export function stableId(source: string, title: string): string {
   let hash = 0;
   const str = `${source}:${title}`;
   for (let i = 0; i < str.length; i++) {
@@ -517,30 +565,43 @@ const SCOPE_ATTRIBUTED_TIERS = new Set<QueryMemoryTier>(["insight"]);
 // `date` field.
 const CONTRADICTION_TIERS = new Set<QueryMemoryTier>(["journal", "palace"]);
 
-/** Multiplicative down-rank applied to a candidate detected as the STALE
- *  side of a resolved contradiction — mirrors `applyHotWindowBoost`'s own
- *  multiplicative-penalty pattern (a flat factor, not a hand-tuned curve).
- *  0.5 halves the candidate's per-tier score, which this stage then also
- *  re-sorts by (see `applyContradictionStage`) so the halving actually
- *  changes the candidate's ARRAY POSITION — and therefore its RRF rank
- *  contribution downstream in `applyRRF`, which reads position, not the raw
- *  `.score` value, for its `1/(RRF_K+rank)` contribution. A flat multiplier
- *  cannot mathematically GUARANTEE the stale item lands below every
- *  possible current sibling in every possible score distribution (a much
- *  weaker current match could still end up below a strongly-matching but
- *  halved stale one) — the exact same caveat `applyHotWindowBoost`'s own
- *  flat multiplier already carries; this is not a new gap introduced here. */
-const CONTRADICTION_PENALTY = 0.5;
-
 /**
+ * ANNOTATE-ONLY (pre-ship red-team fix, STEP 4a, 2026-09-01, wave/pipe-w5fix
+ * — correctness red-team, reports/2026-09-01-pipe-w5fix-report.md).
+ *
+ * The ORIGINAL W5a design multiplicatively down-ranked a confidently-
+ * resolved-stale candidate (a flat `CONTRADICTION_PENALTY = 0.5`, re-sorted
+ * immediately after so the halving actually moved the item's ARRAY
+ * POSITION — `applyRRF` reads position, not raw `.score`, for its
+ * `1/(RRF_K+rank)` contribution). A second, independent (correctness, not
+ * security) red-team proved this is NET-NEGATIVE, not merely imperfect:
+ * the version-token grammar (see `./contradiction.ts`'s `grammarConflict`)
+ * false-positives on common number-shaped prose that is never a genuine
+ * version mention at all — IP addresses ("at 10.0.0.1" / "at 10.0.1.5"),
+ * dot-formatted dates ("08.15.2026" vs "08.16.2026"), dotted step/section
+ * numbers ("step 1.2.3" vs "step 5.6.7"). When a false positive like this
+ * fires, the down-rank+re-sort mechanism doesn't just add noise — it
+ * INVERTS ranking, demoting a correct, unrelated fact below a weaker match
+ * purely because both happen to contain three dot-separated digit groups.
+ * A missed real contradiction degrades gracefully (decay/recency still
+ * favor the newer entry over time); a false-positive-driven rank inversion
+ * actively returns the WRONG answer with high confidence.
+ *
+ * FIX: `applyContradictionStage` below still detects and ANNOTATES
+ * (`supersededBy`/`conflictsWith`) exactly as before — the detection +
+ * annotation mechanism was never the problem — but it no longer touches
+ * `score` or reorders `items` at all. A false-positive grammar match is now
+ * harmless (an extra, ignorable annotation field) instead of rank-
+ * corrupting. This is paired with a HIGH-PRECISION tightening of the
+ * grammar itself (`./contradiction.ts`'s own header) so the annotation
+ * itself also fires far less often on non-version prose — belt AND
+ * suspenders, not a substitute for each other: even a genuine version
+ * conflict now only annotates, never reorders.
+ *
  * Runs `detectContradictions` over one tier's already-scored item list and
- * returns a NEW array (same length, same membership — see this function's
- * own down-rank-not-drop invariant) with conflicting items annotated
- * (`conflictsWith`) and confidently-resolved-stale items additionally
- * down-ranked (`supersededBy` + halved `score`) and re-sorted so the
- * down-rank is actually visible to the RANK/FUSE stage immediately after
- * this one (see `CONTRADICTION_PENALTY`'s doc comment for why the re-sort
- * is required, not cosmetic).
+ * returns a NEW array (same length, same membership, SAME ORDER — annotation
+ * never reorders) with conflicting items annotated (`conflictsWith`) and
+ * confidently-resolved-stale items additionally annotated (`supersededBy`).
  *
  * No-ops (returns `items` UNCHANGED, same reference) for: any tier not in
  * `CONTRADICTION_TIERS`, and any tier with fewer than 2 items (nothing to
@@ -565,7 +626,11 @@ function applyContradictionStage(tier: QueryMemoryTier, items: QueryMemoryItem[]
   const { supersededBy, conflictsWith } = detectContradictions(view);
   if (supersededBy.size === 0 && conflictsWith.size === 0) return items;
 
-  const annotated = items.map((it, idx) => {
+  // ANNOTATE-ONLY: map to a new array (so callers still get fresh objects
+  // for the items that changed) but never touch `.score` and never reorder
+  // — `items`' own array order (already RANK/FUSE-input order from the
+  // TOKENIZE+SCORE stage immediately before this one) is preserved exactly.
+  return items.map((it, idx) => {
     const conflicts = conflictsWith.get(idx);
     const staleOf = supersededBy.get(idx);
     if (!conflicts && staleOf === undefined) return it;
@@ -575,20 +640,9 @@ function applyContradictionStage(tier: QueryMemoryTier, items: QueryMemoryItem[]
     }
     if (staleOf !== undefined) {
       next.supersededBy = items[staleOf].id;
-      next.score = next.score * CONTRADICTION_PENALTY;
     }
     return next;
   });
-  // Re-sort by the (possibly just-penalized) per-tier score — see
-  // CONTRADICTION_PENALTY's doc comment: applyRRF's contribution is
-  // positional (array index = rank), not score-value-based, so a penalty
-  // that doesn't move the item's position would be invisible downstream.
-  // Matches the same tier scorers' own convention (scoreJournalTier /
-  // scorePalaceTier both `.sort((a,b) => b.score-a.score)` before
-  // returning) — this stage simply re-establishes that invariant after
-  // mutating scores.
-  annotated.sort((a, b) => b.score - a.score);
-  return annotated;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,9 +650,32 @@ function applyContradictionStage(tier: QueryMemoryTier, items: QueryMemoryItem[]
 // not cover `~/.claude/projects/<entry>/memory/journal/` (storage/paths.ts's
 // journalDirs() legacy-fallback branch) — journalSearch()/smart_recall today
 // DO scan it. Mirrors journalDirs()'s own traversal exactly, read-only, never
-// throws. Untrusted always false: this content predates the working-memory
-// rescue mechanism's existence entirely (it is a pre-package memory format),
-// so it structurally cannot carry a `source: working-memory-rescue` tag.
+// throws.
+//
+// SECURITY FIX (pre-ship red-team Break #1, 2026-09-01): this reader used to
+// HARDCODE `untrusted: false` on every candidate, reasoning (now proven
+// WRONG) that "this content predates the working-memory-rescue mechanism's
+// existence entirely, so it structurally cannot carry a `source:
+// working-memory-rescue` tag." That was an ASSERTION about the CONTENT
+// living at this path historically, not an ENFORCED property of the path
+// itself — `getLegacyRoot()` (`~/.claude/projects`) is scanned unconditionally
+// on every install, and nothing stops a rescue-tagged card from being placed
+// there today (a stale AgentRecall install, a manually-copied file, or any
+// future writer that reuses this legacy convention). Because `untrusted` was
+// hardcoded rather than derived, `filterTrusted(readLegacyJournalCandidates(
+// project))` (this file's TRUST-FILTER stage, see `scoreJournalTier` below)
+// was a no-op for this entire source — a planted rescue file here surfaced
+// UNLABELED through the default-on `recall`/`smart_recall` MCP tools via
+// this tier. FIXED: `untrusted`/`sourceTag` are now DERIVED per-candidate
+// from the file's own frontmatter, via the SAME `isRescueSourcedContent`/
+// `extractFrontmatterSource` choke every sibling reader in
+// `retrieval/candidates.ts` already uses (`readJournalCandidates`,
+// `readPalaceRoomCandidates`) — not a second, forked trust decision. See
+// `packages/core/test/query-memory-pipeline.test.mjs`'s legacy-journal
+// destination-proof for the planted-rescue-content regression test, and
+// `packages/core/test/identity-trust-completeness.test.mjs`'s new
+// hardcoded-untrusted-false completeness check (STEP 3, same date) for the
+// harness-level class fix that would have caught this before ship.
 //
 // Independent review fix (MEDIUM-1, W2, 2026-08-30): returns date-descending
 // (sorted below, before returning) — same sort-before-truncate closure this
@@ -653,7 +730,8 @@ function readLegacyJournalCandidates(project: string): MemoryCandidate[] {
         sourcePath,
         file,
         sourceKind: "journal-live",
-        untrusted: false,
+        untrusted: isRescueSourcedContent(content),
+        sourceTag: extractFrontmatterSource(content),
       });
     }
   }
@@ -1091,8 +1169,10 @@ export async function queryMemory(input: QueryMemoryInput): Promise<QueryMemoryR
       if (SCOPE_ATTRIBUTED_TIERS.has(tier)) {
         items = applyScope(items, input.project, input.scope);
       }
-      // CONTRADICTION stage (Wave 5a) — down-rank + annotate superseded
-      // candidates within this tier; never drops (see CONTRADICTION_TIERS
+      // CONTRADICTION stage (Wave 5a; ANNOTATE-ONLY as of the STEP 4a
+      // pre-ship fix, 2026-09-01 — see applyContradictionStage's own doc
+      // comment) — annotates superseded candidates within this tier; never
+      // drops, never re-scores, never reorders (see CONTRADICTION_TIERS
       // above for why insight is short-circuited this wave).
       items = applyContradictionStage(tier, items);
       byTier[tier] = items;

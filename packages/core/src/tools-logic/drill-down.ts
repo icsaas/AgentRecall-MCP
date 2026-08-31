@@ -16,11 +16,36 @@
  * "journal" so the two can never collide (see the "archive" branch below).
  *
  * NEVER throws into recall — returns null on any error or path-escape attempt.
+ *
+ * ── SECURITY FIX (pre-ship red-team Break #2, 2026-09-01, wave/pipe-w5fix,
+ * STEP 2) ──
+ * The "palace" branch (below) used to do a raw `fs.readFileSync` with NO
+ * trust check at all. `identity-trust-completeness.test.mjs`'s PART F
+ * (multi-region residual check) previously allowlisted this branch as "SAFE
+ * by structural argument" — reasoning that `key.room`/`key.file` are
+ * caller-specified (a single explicit file, not a passive room glob) so no
+ * LIVE caller could plant a rescue-tagged file at an attacker-chosen
+ * location and have it surface here. That argument is about who CALLS this
+ * function today; it says nothing about the function's OWN body, and
+ * `fetchVerbatim` is a PUBLIC export with no caller-enforcement mechanism —
+ * a future caller (or a caller reachable via a `verbatimKey` round-tripped
+ * through a result item, which is exactly what this function exists to
+ * resolve) could legitimately pass a `{kind:"palace", room, file}` pointing
+ * at a rescue-tagged room file, and this branch would have returned its raw
+ * content unfiltered. FIXED: the palace branch now calls
+ * `isRescueSourcedContent` before returning, mirroring the journal branch's
+ * own `readJournalFile` choke immediately above it — a rescue-tagged palace
+ * file resolves to `null` (the same "nothing genuine found" contract a
+ * missing file already gets), never fabricating a substitute. The
+ * "structural argument" allowlist entry for this branch is retired in favor
+ * of this code-enforced choke — see identity-trust-completeness.test.mjs's
+ * updated PART F assertion.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { readJournalFile } from "../helpers/journal-files.js";
+import { isRescueSourcedContent } from "../helpers/journal-filter.js";
 import { archiveRawDir, palaceDir, sanitizeSlug } from "../storage/paths.js";
 import { scrubForCloud } from "../storage/content-guard.js";
 import { getRoot } from "../types.js";
@@ -120,6 +145,11 @@ export function fetchVerbatim(project: string, key: VerbatimKey | undefined): Ve
 
     if (!fs.existsSync(p)) return null;
     const text = fs.readFileSync(p, "utf-8");
+    // Identity-trust (pre-ship red-team fix, Break #2, 2026-09-01): mirror
+    // the journal branch's readJournalFile choke above — a rescue-tagged
+    // palace file must never be attached as a "verbatim source" for a
+    // resurrect()/recall() result, even for a caller-specified single file.
+    if (isRescueSourcedContent(text)) return null;
     return { found: true, source: `palace/${key.room}/${key.file}`, text: cap(text) };
   } catch {
     return null; // never throw into recall

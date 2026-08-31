@@ -2,7 +2,7 @@ import { resolveProject } from "../storage/project.js";
 import { ensurePalaceInitialized } from "../palace/rooms.js";
 import { tokenizeWords } from "../helpers/tokenize.js";
 import { readTierCandidates } from "../retrieval/candidates.js";
-import { queryMemory } from "../retrieval/query-memory.js";
+import { queryMemory, stableId } from "../retrieval/query-memory.js";
 
 export interface JournalSearchInput {
   query: string;
@@ -41,6 +41,21 @@ export function parseSinceDate(since: string): Date {
 
 export interface JournalSearchResult {
   results: Array<{
+    /**
+     * RESOLVABLE-ANNOTATION fix (pre-ship red-team fix, STEP 4c, 2026-09-01,
+     * wave/pipe-w5fix — correctness red-team). Additive: this result's own
+     * stable identity (`QueryMemoryItem.id`, the SAME id `smart_recall`'s
+     * `SmartRecallResultItem.id` exposes for the equivalent underlying
+     * item), so `supersededBy`/`conflictsWith` below can be cross-referenced
+     * against a SIBLING entry's `id` in this SAME array — mirroring
+     * `SmartRecallResultItem`'s existing `id` field. Before this fix,
+     * `JournalSearchResult.results` carried no `id` of its own at all, so an
+     * agent reading `journal_search`'s JSON output had a `supersededBy`
+     * value with nothing in the SAME payload to resolve it against (it was
+     * only meaningful against `queryMemory()`'s internal, unexposed item
+     * set) — this is `E10`'s "annotation is resolvable via id" requirement.
+     */
+    id: string;
     date: string;
     section: string;
     excerpt: string;
@@ -49,28 +64,35 @@ export interface JournalSearchResult {
      * CONTRADICTION stage (Wave 5a, `retrieval/contradiction.ts`) — set ONLY
      * when this result was detected as the STALE side of a same-tier
      * version-token conflict with a sibling that could be confidently
-     * ordered as more current. Holds the CURRENT sibling's `id`
-     * (`QueryMemoryItem.id`, stable across queryMemory() calls but not
-     * otherwise exposed on this result shape). Additive — absent when no
-     * conflict was detected. W5a salvage (2026-08-31, HIGH-3): this field
-     * was computed by `queryMemory()`'s journal tier all along but silently
-     * dropped by this function's own field-list map below (the same gap
-     * `smart-recall.ts`'s `localRecallSearch` had) — now threaded through.
-     * NOTE: since `journalSearch()` still applies its own `section` filter
-     * and `limit` slice AFTER this map, a `supersededBy`/`conflictsWith` id
-     * can point at a sibling that this call's OWN filtered/truncated
-     * `results` array no longer contains — this is an accepted, additive-
-     * metadata limitation (see STEP 3 of the W5a salvage report), not a
-     * broken contract: the id is still meaningful against the underlying
-     * `queryMemory()` candidate set, just not guaranteed to be a same-array
-     * cross-reference the way it is for `smart_recall` (which does not
-     * section-filter or truncate before this annotation is attached).
+     * ordered as more current. Holds the CURRENT sibling's `id` — as of the
+     * STEP 4c fix above, that id is now this SAME array's own `id` field for
+     * the corresponding entry (when that sibling survives this call's own
+     * `section` filter / `limit` truncation — see below). Additive — absent
+     * when no conflict was detected. W5a salvage (2026-08-31, HIGH-3): this
+     * field was computed by `queryMemory()`'s journal tier all along but
+     * silently dropped by this function's own field-list map below (the
+     * same gap `smart-recall.ts`'s `localRecallSearch` had) — now threaded
+     * through. NOTE: since `journalSearch()` still applies its own `section`
+     * filter and `limit` slice AFTER this map, a `supersededBy`/
+     * `conflictsWith` id CAN still point at a sibling that this call's OWN
+     * filtered/truncated `results` array no longer contains — this is an
+     * accepted, additive-metadata limitation (see STEP 3 of the W5a salvage
+     * report), not a broken contract: the id is still meaningful against the
+     * underlying `queryMemory()` candidate set, and — as of STEP 4c —
+     * resolvable within THIS array whenever both sides of the pair survive
+     * the same filter/truncation (unlike before, when there was no `id`
+     * field on this shape to resolve against even in that common case).
+     * ANNOTATE-ONLY (STEP 4a): a `supersededBy` result's rank/order in this
+     * array is never changed by the contradiction stage itself (see
+     * query-memory.ts's `applyContradictionStage`) — journalSearch's own
+     * independent date-descending sort below is unaffected either way.
      */
     supersededBy?: string;
     /** CONTRADICTION stage (Wave 5a) — the `id`s of every sibling this
      *  result's text grammar-conflicts with, regardless of whether a stale
      *  direction could be resolved. See `supersededBy`'s doc comment for
-     *  the same truncation/section-filter caveat. */
+     *  the same truncation/section-filter caveat, and for the STEP 4c
+     *  resolvable-via-`id` fix. */
     conflictsWith?: string[];
   }>;
   palace_searched: boolean;
@@ -150,6 +172,9 @@ export async function journalSearch(input: JournalSearchInput): Promise<JournalS
     // surface would consume.
     const section = it.title.slice(date.length + 3);
     return {
+      // STEP 4c (2026-09-01): expose queryMemory()'s own stable id — see
+      // JournalSearchResult["results"]["id"]'s own doc comment for why.
+      id: it.id,
       date, section, excerpt: it.excerpt, line: it.line ?? 0,
       // W5a salvage (HIGH-3, 2026-08-31): thread the CONTRADICTION stage's
       // annotation through — see JournalSearchResult["results"]'s own doc
@@ -178,20 +203,19 @@ export async function journalSearch(input: JournalSearchInput): Promise<JournalS
   // results below is re-sorted once more, at the very end, matching the
   // ORIGINAL's single final sort over the combined set.
   //
-  // W5a salvage STEP 3 note (2026-08-31): this date-descending sort makes
-  // the CONTRADICTION stage's own internal re-sort-by-penalized-score
-  // (query-memory.ts's `applyContradictionStage`) REDUNDANT for this
-  // surface specifically — a down-ranked/stale item is, by construction,
-  // the OLDER-dated one (direction is resolved by date for journal — see
-  // contradiction.ts's DIRECTION rule), so it already sorts to the bottom
-  // here regardless of its penalized score. This is expected, not a bug:
-  // journalSearch()'s own date-desc ordering was always independent of
-  // queryMemory()'s RRF-rank-driven ordering (see this function's Wave 3b
-  // migration notes above). The VALUE this stage adds to journalSearch is
-  // therefore the now-VISIBLE `supersededBy`/`conflictsWith` annotation
-  // (see the map above), not a reorder this surface never needed in the
-  // first place — do not attempt to force the reorder to matter here by
-  // changing this sort's key.
+  // W5a salvage STEP 3 note (2026-08-31; updated STEP 4a, 2026-09-01): this
+  // date-descending sort was ALREADY independent of the CONTRADICTION
+  // stage's own re-sort (query-memory.ts's `applyContradictionStage` used to
+  // re-sort by penalized score) — a stale item is, by construction, the
+  // OLDER-dated one (direction is resolved by date for journal — see
+  // contradiction.ts's DIRECTION rule), so it already sorted to the bottom
+  // here regardless. As of STEP 4a, `applyContradictionStage` no longer
+  // re-sorts at all (ANNOTATE-ONLY) — this sort's independence from it is
+  // now simply a non-issue rather than a redundancy to note. The VALUE this
+  // stage adds to journalSearch is the now-VISIBLE, now-resolvable-via-`id`
+  // (STEP 4c) `supersededBy`/`conflictsWith` annotation (see the map above),
+  // not a reorder this surface never needed in the first place — do not
+  // attempt to force the reorder to matter here by changing this sort's key.
   results.sort((a, b) => b.date.localeCompare(a.date));
   results = results.slice(0, limit);
 
@@ -218,7 +242,24 @@ export async function journalSearch(input: JournalSearchInput): Promise<JournalS
             let excerpt = lines[i].slice(start, end).trim();
             if (start > 0) excerpt = "..." + excerpt;
             if (end < lines[i].length) excerpt = excerpt + "...";
-            results.push({ date: `palace:${c.room}`, section: c.file.replace(".md", ""), excerpt, line: i + 1 });
+            // STEP 4c (2026-09-01): this branch never produces a
+            // QueryMemoryItem (it bypasses queryMemory() entirely — its own
+            // local candidate scan, see this branch's header comment above),
+            // so there is no pre-existing `.id` to thread through. Mint one
+            // with the SAME stableId() helper queryMemory() itself uses, so
+            // every row in `results` carries a real id, not just the
+            // primary journal-tier ones. These rows never carry
+            // `supersededBy`/`conflictsWith` (the CONTRADICTION stage only
+            // runs inside queryMemory(), which this branch does not call),
+            // so the id here only needs to be unique for cross-row identity,
+            // not resolvable against an annotation.
+            results.push({
+              id: stableId("palace", `${c.room}/${c.file}/${i}`),
+              date: `palace:${c.room}`,
+              section: c.file.replace(".md", ""),
+              excerpt,
+              line: i + 1,
+            });
           }
         }
       }
