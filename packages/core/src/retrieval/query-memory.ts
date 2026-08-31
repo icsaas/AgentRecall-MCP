@@ -159,10 +159,49 @@
  * `session_start()` remain unmigrated — see the Wave 3b report's resurrect
  * assessment for why `resurrect()` in particular is a RECOMMENDATION, not a
  * migration, this wave.
+ *
+ * ── WAVE 5a UPDATE (2026-08-31, reports/2026-08-31-pipe-w5a-contradiction-
+ * report.md) ──
+ * A new CONTRADICTION stage (`./contradiction.ts`'s `detectContradictions`)
+ * now runs per-tier, immediately after TOKENIZE+SCORE and before RANK/FUSE
+ * (see `applyContradictionStage` below) — for `journal` and `palace` tiers
+ * ONLY (the `insight` tier has no per-item authored-date signal to resolve a
+ * direction with, so it is deliberately skipped this wave, not silently
+ * inherited). It reuses `helpers/conflict-scan.ts`'s existing version token
+ * grammar to find, within one tier's own already-scored candidate list,
+ * pairs that assert the same fact-key with a different semver value. A
+ * candidate detected as the STALE side of such a pair is DOWN-RANKED
+ * (multiplicative score penalty, mirroring `applyHotWindowBoost`'s pattern)
+ * and ANNOTATED (`supersededBy`) — it is NEVER removed from the set. This
+ * closes part of the reconciliation gap `reports/2026-08-18-eval-redteam.md`'s
+ * HIGH-2 finding named (0% of grammar-detectable contradictions were
+ * previously surfaced with any corrective signal) for the subset of that gap
+ * the existing grammar can actually see — semantic-prose contradictions
+ * (that same finding's own PostgreSQL→CockroachDB example) remain out of
+ * reach; see `./contradiction.ts`'s header for why, and this wave's report
+ * for the follow-up.
+ *
+ * ── W5a SALVAGE (2026-08-31, "## W5a salvage" section of the same report) ──
+ * The original W5a cut also ran `extractStatusTokens`/`extractKVTokens`
+ * through this stage. An independent review found those two branches
+ * false-positive-prone in a way that DEFEATS this stage's own safety intent
+ * (HIGH-1: common phrasing like "status: blocked" vs "status: stuck" — the
+ * SAME status category — got flagged conflicting via the KV branch's literal
+ * value comparison; HIGH-2: generic single-word keys like "priority" gave no
+ * topical protection, flagging topically-unrelated candidates) and found the
+ * `supersededBy`/`conflictsWith` annotation never reached `smart_recall`'s
+ * or `journal_search`'s external contract (HIGH-3, invisible to agents).
+ * FIXED: `./contradiction.ts`'s `grammarConflict` now checks version tokens
+ * ONLY (see that file's header for the full reasoning); the annotation now
+ * threads into `SmartRecallResultItem`/`JournalSearchResult.results` (see
+ * `smart-recall.ts`'s `localRecallSearch` and `journal-search.ts`'s
+ * `journalSearch`). The down-rank+re-sort+never-drop mechanism itself,
+ * proven correct by the original W5a review, is UNCHANGED.
  */
 
 import { readTierCandidates, filterTrusted, type MemoryCandidate } from "./candidates.js";
 import { applyScope } from "./scope.js";
+import { detectContradictions, type ContradictionItem } from "./contradiction.js";
 import { listRooms, recordAccess, ensurePalaceInitialized } from "../palace/rooms.js";
 import { stem, expandQuery } from "../helpers/normalize.js";
 import { tokenizeWords } from "../helpers/tokenize.js";
@@ -216,10 +255,22 @@ export interface QueryMemoryItem {
    *  carried it (`keyword_score` on `PalaceSearchResult`) — forward-compat,
    *  currently unused by any consumer post-migration but not worth dropping. */
   keywordScore?: number;
-  /** Journal-only (Wave 3b, 2026-08-30): 1-indexed line number within the
-   *  matched candidate's content — needed by `journalSearch()`'s migrated
+  /** 1-indexed line number within the matched candidate's content.
+   *  Journal (Wave 3b, 2026-08-30): needed by `journalSearch()`'s migrated
    *  adapter to reconstruct its external `{date,section,excerpt,line}`
-   *  contract exactly. Not set by any other tier's scorer. */
+   *  contract exactly — load-bearing, do not stop populating this for the
+   *  journal tier. Palace (Wave 5a, 2026-08-31): ALSO now populated — the
+   *  matched line's append-order within its room file, consumed by the
+   *  CONTRADICTION stage (`./contradiction.ts`) as the `order` tie-break
+   *  signal for same-day palace conflicts (palace's `date` is a regex-
+   *  scraped guess from the excerpt text, not a reliable per-entry
+   *  timestamp — see that field's own doc comment below — so two same-day
+   *  or date-less palace hits need a second, always-present signal to
+   *  resolve "which is more current"; a room file is append-only in
+   *  practice, so a later line number is a reasonable proxy for "written
+   *  later"). Purely additive: no existing consumer of the palace tier's
+   *  `QueryMemoryItem` read this field before Wave 5a, so populating it
+   *  changes no external contract. */
   line?: number;
   /**
    * SCOPE stage attribution (Wave 3b, `retrieval/scope.ts`'s `applyScope`) —
@@ -236,6 +287,31 @@ export interface QueryMemoryItem {
    * different, tier-inappropriate signal for those two tiers).
    */
   projects?: string[];
+  /**
+   * CONTRADICTION stage (Wave 5a, `./contradiction.ts`) — set ONLY when
+   * this item was detected as the STALE side of a same-tier, same-fact-key
+   * version-token grammar conflict (status/kv detection removed by the W5a
+   * salvage, 2026-08-31 — see `./contradiction.ts`'s header) with a sibling
+   * this stage could confidently order as more current (see `applyContradictionStage`
+   * below). Holds the CURRENT sibling's `id`. Additive: absent on every
+   * item unaffected by this stage, including every item from the `insight`
+   * tier (deliberately skipped this wave) and every journal/palace item
+   * with no detected conflict. A `supersededBy` item ALWAYS also carries a
+   * multiplicatively down-ranked `score` (see `CONTRADICTION_PENALTY`) —
+   * it is NEVER removed from `items`.
+   */
+  supersededBy?: string;
+  /**
+   * CONTRADICTION stage (Wave 5a) — the `id`s of every sibling this item's
+   * text grammar-conflicts with, REGARDLESS of whether a stale direction
+   * could be resolved (a superset of the signal behind `supersededBy`: an
+   * item can appear here alone, with no `supersededBy`, when the conflict
+   * is a same-day/no-signal TIE — both sides are annotated, NEITHER is
+   * penalized; see `./contradiction.ts`'s own header for why guessing a
+   * direction from no signal is the failure mode this stage exists to
+   * avoid, not merely to relocate).
+   */
+  conflictsWith?: string[];
 }
 
 export interface QueryMemoryInput {
@@ -420,6 +496,100 @@ function lineMatchesQuery(line: string, keywords: string[]): boolean {
 // this set WHEN its scorer is built to populate `projects`/an equivalent
 // attribution field on its QueryMemoryItems — not before.
 const SCOPE_ATTRIBUTED_TIERS = new Set<QueryMemoryTier>(["insight"]);
+
+// ---------------------------------------------------------------------------
+// CONTRADICTION stage (Wave 5a, 2026-08-31) — runs per-tier, AFTER
+// TOKENIZE+SCORE and (for tiers that have one) after SCOPE, BEFORE RANK/FUSE.
+// `detectContradictions` itself (`./contradiction.ts`) is a pure, tier-
+// agnostic comparator; what lives HERE, mirroring SCOPE_ATTRIBUTED_TIERS
+// immediately above, is the tier-level decision of which tiers run through
+// it and how each tier's `order` tie-break signal is supplied.
+//
+// CONTRADICTION_TIERS: journal and palace only — matches this wave's
+// ASSERT_INVARIANTS exactly ("DO NOT apply the stage to the insight tier
+// this sub-wave (no date signal)"). `insight` items have no per-item
+// authored-date at all (their score is confirmation-count/relevance driven,
+// not time-based — see scoreInsightTier's own doc comment above), so there
+// is no DIRECTION signal `detectContradictions` could ever resolve for that
+// tier; short-circuiting it here (a new tier joins this Set, never a new
+// branch inside `applyContradictionStage`) keeps that decision explicit and
+// enumerable rather than an implicit side effect of insight items lacking a
+// `date` field.
+const CONTRADICTION_TIERS = new Set<QueryMemoryTier>(["journal", "palace"]);
+
+/** Multiplicative down-rank applied to a candidate detected as the STALE
+ *  side of a resolved contradiction — mirrors `applyHotWindowBoost`'s own
+ *  multiplicative-penalty pattern (a flat factor, not a hand-tuned curve).
+ *  0.5 halves the candidate's per-tier score, which this stage then also
+ *  re-sorts by (see `applyContradictionStage`) so the halving actually
+ *  changes the candidate's ARRAY POSITION — and therefore its RRF rank
+ *  contribution downstream in `applyRRF`, which reads position, not the raw
+ *  `.score` value, for its `1/(RRF_K+rank)` contribution. A flat multiplier
+ *  cannot mathematically GUARANTEE the stale item lands below every
+ *  possible current sibling in every possible score distribution (a much
+ *  weaker current match could still end up below a strongly-matching but
+ *  halved stale one) — the exact same caveat `applyHotWindowBoost`'s own
+ *  flat multiplier already carries; this is not a new gap introduced here. */
+const CONTRADICTION_PENALTY = 0.5;
+
+/**
+ * Runs `detectContradictions` over one tier's already-scored item list and
+ * returns a NEW array (same length, same membership — see this function's
+ * own down-rank-not-drop invariant) with conflicting items annotated
+ * (`conflictsWith`) and confidently-resolved-stale items additionally
+ * down-ranked (`supersededBy` + halved `score`) and re-sorted so the
+ * down-rank is actually visible to the RANK/FUSE stage immediately after
+ * this one (see `CONTRADICTION_PENALTY`'s doc comment for why the re-sort
+ * is required, not cosmetic).
+ *
+ * No-ops (returns `items` UNCHANGED, same reference) for: any tier not in
+ * `CONTRADICTION_TIERS`, and any tier with fewer than 2 items (nothing to
+ * compare — also the O(n²) stage's own trivial-input guard, so a 0- or
+ * 1-candidate tier can never pay a quadratic cost or crash on an empty
+ * pairwise loop).
+ */
+function applyContradictionStage(tier: QueryMemoryTier, items: QueryMemoryItem[]): QueryMemoryItem[] {
+  if (!CONTRADICTION_TIERS.has(tier) || items.length < 2) return items;
+
+  const view: ContradictionItem[] = items.map((it) => ({
+    text: `${it.title} ${it.excerpt}`,
+    date: it.date,
+    // Journal deliberately does NOT supply `order` — this wave's brief:
+    // "journal → older authored date" only; a same-date journal tie must
+    // fall through to the ambiguous (annotate-both, penalize-neither)
+    // branch inside detectContradictions, not guess off line position.
+    // Palace DOES supply it (the room-file append-order proxy — see
+    // QueryMemoryItem.line's doc comment) as its same-day tie-break.
+    order: tier === "palace" ? it.line : undefined,
+  }));
+  const { supersededBy, conflictsWith } = detectContradictions(view);
+  if (supersededBy.size === 0 && conflictsWith.size === 0) return items;
+
+  const annotated = items.map((it, idx) => {
+    const conflicts = conflictsWith.get(idx);
+    const staleOf = supersededBy.get(idx);
+    if (!conflicts && staleOf === undefined) return it;
+    const next: QueryMemoryItem = { ...it };
+    if (conflicts && conflicts.length > 0) {
+      next.conflictsWith = conflicts.map((i) => items[i].id);
+    }
+    if (staleOf !== undefined) {
+      next.supersededBy = items[staleOf].id;
+      next.score = next.score * CONTRADICTION_PENALTY;
+    }
+    return next;
+  });
+  // Re-sort by the (possibly just-penalized) per-tier score — see
+  // CONTRADICTION_PENALTY's doc comment: applyRRF's contribution is
+  // positional (array index = rank), not score-value-based, so a penalty
+  // that doesn't move the item's position would be invisible downstream.
+  // Matches the same tier scorers' own convention (scoreJournalTier /
+  // scorePalaceTier both `.sort((a,b) => b.score-a.score)` before
+  // returning) — this stage simply re-establishes that invariant after
+  // mutating scores.
+  annotated.sort((a, b) => b.score - a.score);
+  return annotated;
+}
 
 // ---------------------------------------------------------------------------
 // CHALLENGE (c)-3: legacy journal directory. Wave 1's readTierCandidates does
@@ -752,6 +922,9 @@ function scorePalaceTier(
       file: h.file,
       date: datePattern ? datePattern[1] : undefined,
       keywordScore: h.keywordScore,
+      // Wave 5a: append-order signal for the CONTRADICTION stage's
+      // same-day/no-date tie-break — see QueryMemoryItem.line's doc comment.
+      line: h.line,
     };
   });
   items.sort((a, b) => b.score - a.score);
@@ -918,6 +1091,10 @@ export async function queryMemory(input: QueryMemoryInput): Promise<QueryMemoryR
       if (SCOPE_ATTRIBUTED_TIERS.has(tier)) {
         items = applyScope(items, input.project, input.scope);
       }
+      // CONTRADICTION stage (Wave 5a) — down-rank + annotate superseded
+      // candidates within this tier; never drops (see CONTRADICTION_TIERS
+      // above for why insight is short-circuited this wave).
+      items = applyContradictionStage(tier, items);
       byTier[tier] = items;
       candidatesBySource[tier] = items.length;
       sourcesQueried.push(tier);
