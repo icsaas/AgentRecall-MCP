@@ -9,6 +9,7 @@ import { resolveProject, isValidProjectSlug } from "../storage/project.js";
 import { resetOwnedFiles, getSessionId, claimSessionStartOnce } from "../storage/session.js";
 import { recordLifecycleEvent } from "../storage/lifecycle-telemetry.js";
 import { ensurePalaceInitialized, listRooms, isRoomStale, countRoomEntries } from "../palace/rooms.js";
+import { DEFAULT_PALACE_ROOMS } from "../types.js";
 import { readIdentity } from "../palace/identity.js";
 import { readAwarenessState, fetchDashboardArchivedTitles } from "../palace/awareness.js";
 import { recallInsights, readInsightsIndex } from "../palace/insights-index.js";
@@ -588,12 +589,35 @@ export async function sessionStart(input: SessionStartInput): Promise<SessionSta
 
   // 3b. Populate topics from room description (clean semantic labels)
   //     Previously extracted from raw file content — produced noisy date/name keywords.
+  //
+  // W5c content-quality fix (2026-08-31) — `meta.description` defaults to the
+  // static DEFAULT_PALACE_ROOMS scaffold string and is rendered IDENTICALLY
+  // whether the room holds 10 real entries or 0: a brand-new, untouched
+  // "Blockers" room emitted the exact same "topics" as a fully-populated one.
+  // Suppress topics (never emit the field) when EITHER holds:
+  //   - the room has zero real entries (countRoomEntries — the same disk-truth
+  //     check listRooms() above already computed once per room for the sort,
+  //     so this is a second cheap regex scan, not new I/O shape), or
+  //   - meta.description is still byte-identical to the unedited default
+  //     template for this slug (a scaffold stub, not curated content).
+  // Either signal alone means the description is template noise, not a
+  // human/agent-authored summary — extracting "keywords" from it is
+  // misleading regardless of how clean the keywords look. Custom rooms (no
+  // matching default slug, or an edited description) are unaffected and keep
+  // deriving topics exactly as before. Deliberately NOT switching to deriving
+  // topics from raw room content instead (option B considered and rejected):
+  // that is the ORIGINAL design this very block replaced, per the comment
+  // above — "produced noisy date/name keywords" — re-adding it here would
+  // resurrect a defect this code already fixed once.
+  const defaultDescBySlug = new Map(DEFAULT_PALACE_ROOMS.map((r) => [r.slug as string, r.description as string]));
   for (let i = 0; i < active_rooms.length; i++) {
     const meta = rooms[i]; // RoomMeta, aligned with active_rooms by index
-    if (meta.description) {
-      const topics = extractKeywords(meta.description, 4);
-      if (topics.length > 0) active_rooms[i].topics = topics;
-    }
+    if (!meta.description) continue;
+    const roomIsEmpty = countRoomEntries(slug, meta.slug) === 0;
+    const isUneditedDefault = defaultDescBySlug.get(meta.slug) === meta.description;
+    if (roomIsEmpty || isUneditedDefault) continue;
+    const topics = extractKeywords(meta.description, 4);
+    if (topics.length > 0) active_rooms[i].topics = topics;
   }
 
   // 4. Cross-project insights matching current context — cap at 1 (was 5).
