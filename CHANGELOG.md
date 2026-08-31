@@ -6,6 +6,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.4.47] — 2026-09-01
+
+Retrieval-pipeline refactor: the read path is now a single shared, staged pipeline (`queryMemory`) that data is *forced* through, replacing the ~9 independent per-surface readers that had let every cross-cutting property (trust-filtering, injection-fencing, CJK tokenization, scope) recur one surface at a time. This closes the rescue-injection class *by construction* rather than per-instance, and was hardened by two independent adversarial red-team passes before release (both found and fixed real gaps — see Security). External contracts are preserved; changes are additive.
+
+### Security
+
+- **Rescue-tagged content can no longer surface unlabeled through the default `recall` tool (CRITICAL).** A new legacy-root journal reader introduced during the refactor hardcoded `untrusted: false`, letting a planted `working-memory-rescue` card in `~/.claude/projects/*/memory/journal/` surface via `recall`/`smart_recall` byte-indistinguishable from genuine memory. It now derives trust via the shared choke. Caught by the pre-release security red-team; closure verified at destination.
+- **Exposed-reader class closed across 13 surfaces.** `journalRead`, `fetchVerbatim` (journal + palace branches), `readRoomContent`/`palace-walk`, `journalSearch` `include_palace`, `autoBackfill`→Supabase, and others now route rescue-trust through the shared FETCH stage (`readTierCandidates`) instead of each remembering to call a helper. `palaceSearch`, `check`, `journalColdStart` likewise — the completeness harness now reports zero known-gap palace-room content readers.
+- **Completeness harness cured of its own class-blindness.** The identity-trust harness was whole-file text-matching (a file whose *other* function called the choke was falsely certified safe) and blind to wrapper-based readers. Rebuilt to function-scope AST analysis + cross-package auto-discovery, and extended to flag any reader that hardcodes `untrusted: false` while reading file content without a choke.
+
+### Added
+
+- **`queryMemory` pipeline** — `fetch → trust-filter → score → scope → rank/fuse → fence`, with `readTierCandidates` as the single trust-safe fetch stage (class-not-instance-safe tier dispatch table). `smart_recall`, `journalSearch`, `recallInsight` migrated onto it; scoring stays pluggable per tier.
+- **Per-candidate `scope` stage** (`project` / `global` / `all`, fail-open) — infrastructure for project-scoped retrieval; applied to the insight tier, no-op on the inherently per-project journal/palace tiers.
+- **Content-contradiction annotation** — version supersessions (high-precision: explicit version marker required; IP addresses / dates / step-numbers excluded) surface a resolvable `supersededBy`/`conflictsWith` annotation on `smart_recall`/`journal_search` results. Annotate-only (never re-ranks or drops) — a false match is a harmless flag, not a demotion. Prose-semantic contradiction is deferred (needs a reliable signal, not a token grammar).
+- **Cross-project continuity labeled as orientation** — session-start continuity from other projects is marked (not scoped away), so an agent can tell current-project continuity from "recent elsewhere"; the cross-project-continuity contract is preserved.
+
+### Fixed
+
+- **`PROJECT_INSIGHT_BUDGET` never fired** — `check`'s auto-promote wrote insights without a `project`, so project-scoped insight slots stayed empty forever. Auto-promoted insights are now correctly attributed and surface project-scoped.
+- **Room topics no longer emit misleading default-template keywords** for empty or never-edited palace rooms.
+- **RRF id-collision** in journal scoring (distinct same-section matches silently collapsed) and a `scope:"project"`-with-empty-project silent-empty footgun — both fixed with regression tests.
+
 ## [3.4.46] — 2026-08-21
 
 Patch release: closes the two remaining red-team CRITICALs from the 2026-08-18 eval — both were the same meta-class (the store trusting an unauthenticated cwd/slug identity claim to route memory into a real project).
