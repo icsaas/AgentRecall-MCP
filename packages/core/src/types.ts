@@ -9,7 +9,7 @@ import * as os from "node:os";
 // Constants
 // ---------------------------------------------------------------------------
 
-export const VERSION = "3.4.23";
+export const VERSION = "3.4.46";
 
 // ---------------------------------------------------------------------------
 // Root directory (configurable at runtime for SDK usage)
@@ -104,6 +104,19 @@ export interface RoomMeta {
   last_accessed: string;
   tags: string[];
   connections: string[];
+  /**
+   * Keystone memories occupy load-bearing structural positions — referenced
+   * from pipeline milestone "How solved" or "Synthesis" sections.
+   * When true, salience never drops below KEYSTONE_FLOOR regardless of
+   * access frequency. Set by markKeystones() during consolidation.
+   */
+  keystone?: boolean;
+  /**
+   * Wave 3: non-destructive archive flag. Set by the decay pass when a room's
+   * salience falls at/below the archive threshold. The room dir is NEVER
+   * deleted — the flag is advisory and lets readers down-rank/hide it.
+   */
+  archived?: boolean;
 }
 
 export interface PalaceIndex {

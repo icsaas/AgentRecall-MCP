@@ -8,11 +8,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveProject } from "../storage/project.js";
-import { getRoot } from "../types.js";
 import { ensureDir, todayISO } from "../storage/fs-utils.js";
 import { extractKeywords, generateSlug } from "../helpers/auto-name.js";
 import { generateTags } from "../helpers/tag-generator.js";
-import { writeCorrection } from "../storage/corrections.js";
+import { writeCorrection, splitSentences } from "../storage/corrections.js";
+import { scrubForCloud } from "../storage/content-guard.js";
+import { classifyFailureClass, checkAction, type CheckActionResult } from "./check-action.js";
+import { getSessionId } from "../storage/session.js";
+import { recordLifecycleEvent } from "../storage/lifecycle-telemetry.js";
 import {
   readAlignmentLog as readLog,
   extractWatchPatterns,
@@ -20,9 +23,11 @@ import {
   type WatchForPattern,
 } from "../helpers/alignment-patterns.js";
 import { awarenessUpdate } from "./awareness-update.js";
-import { palaceDir } from "../storage/paths.js";
+import { projectSubPath } from "../storage/paths.js";
 import { listRooms } from "../palace/rooms.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 import { palaceWrite } from "./palace-write.js";
+import { predictCorrection, type PredictCorrectionResult } from "./predict-correction.js";
 
 export interface EvidenceFactor {
   factor: string;
@@ -42,6 +47,16 @@ export interface CheckInput {
   posterior?: number;
   outcome?: "confirmed" | "rejected" | "partial" | string;
   decision_id?: string;
+  /**
+   * C3 (TOW2-329) — what you're about to DO, one sentence, when this call is a
+   * pre-action safety check rather than (or in addition to) an alignment
+   * check. Provide this before publish/deploy/delete/credential/external-send/
+   * irreversible-write actions. When set, `check()` folds in check_action's
+   * matcher (see `action_check` on the result) so the SAME pre-action
+   * correction-matching capability is reachable through the default 5-tool
+   * surface, without exposing the standalone `check_action` tool.
+   */
+  action_description?: string;
 }
 
 export interface WatchFor {
@@ -71,20 +86,42 @@ export interface CheckResult {
    * caller should rephrase as an actionable rule and retry.
    */
   correction_gate_rejected?: string;
+  /**
+   * Wave 5 — forward anticipation: does this goal resemble a tendency the user
+   * has been corrected on? Pushed as an early prior, not a fact pulled late.
+   * Absent when prediction could not run or no blind-spots profile exists.
+   */
+  prediction?: PredictCorrectionResult;
+  /**
+   * C3 (TOW2-329) — present only when `action_description` was provided.
+   * REUSES check_action's matcher (`checkAction` in ./check-action.js) verbatim
+   * — no duplicated matching logic. Carries the same matching_rules /
+   * matching_corrections / matching_insights / warning / verdict shape as the
+   * standalone check_action tool. `verdict: "blocked"` means an authoritative
+   * P0 correction OVERRIDES the plan — matching_corrections is already sorted
+   * P0-before-P1 (severity DESC, then match strength), so the blocking
+   * correction (if any) always leads that list.
+   */
+  action_check?: CheckActionResult;
 }
 
 function alignmentLogPath(project: string): string {
-  const safe = project.replace(/[^a-zA-Z0-9_\-]/g, "-");
-  const root = getRoot();
-  const resolved = path.join(root, "projects", safe, "alignment-log.json");
-  if (!resolved.startsWith(root)) throw new Error(`Invalid project: ${project}`);
-  return resolved;
+  // F2 fix (independent review, 2026-07-20): was a naive local sanitizer (no
+  // lowercase, no existing-dir reuse), duplicated from
+  // helpers/alignment-patterns.ts's own copy — routes through paths.ts now.
+  return projectSubPath(project, "alignment-log.json");
 }
 
 function writeAlignmentLog(project: string, records: AlignmentRecord[]): void {
   const p = alignmentLogPath(project);
   ensureDir(path.dirname(p));
-  fs.writeFileSync(p, JSON.stringify(records, null, 2), "utf-8");
+  // Scrub BEFORE the local write — session-start.ts reads this file directly
+  // (readAlignmentLog) into every session_start briefing, and check() itself
+  // re-reads it into similar_past_deltas on every future call. goal/
+  // human_correction/delta/assumptions are all free-text check() params that
+  // previously reached disk completely unscrubbed (this store has never had
+  // any scrub, cloud or local).
+  fs.writeFileSync(p, scrubForCloud(JSON.stringify(records, null, 2)), "utf-8");
 }
 
 export async function check(input: CheckInput): Promise<CheckResult> {
@@ -115,7 +152,11 @@ export async function check(input: CheckInput): Promise<CheckResult> {
       const corrText = input.human_correction;
       const corrTags = generateTags(corrText);
       const corrDate = todayISO();
-      const corrRule = corrText.split(/[.\n]/)[0]?.trim().slice(0, 100) ?? corrText.slice(0, 100);
+      // v3 (Loop 8): derive the rule TITLE with the decimal-safe splitter so a
+      // version/model token ("Opus 4.7", "v3.4.32") is not chopped mid-token.
+      // This is only the human-readable title; the capture GATE in
+      // writeCorrection now scores the full `context`, not this slice.
+      const corrRule = (splitSentences(corrText)[0] ?? corrText).slice(0, 100);
       // Auto-detect severity based on correction language.
       // "no" alone is NOT a P0 trigger — it's too broad ("no, use the blue button" ≠ rule).
       // P0 requires explicit prohibition/mandate language.
@@ -130,6 +171,16 @@ export async function check(input: CheckInput): Promise<CheckResult> {
         rule: corrRule,
         context: corrText,
         tags: corrTags,
+        // RD-1 (owner decision 2026-07-14): failure_class is auto-derived at
+        // capture — keyword classifier over the FULL correction text, using
+        // only the shared tokenize/overlap grammar. Zero/tied hits → "other".
+        failure_class: classifyFailureClass(corrText),
+        // C2 (2026-07-26): stamp the recording session's identity into the
+        // existing `holder` field (documented as "who recorded this — defaults
+        // to date/session proxy") so corrections captured via check() carry a
+        // consistent session identity, same as corrections.ts's own recordOutcome
+        // call sites in session-start.ts/session-end.ts.
+        holder: getSessionId(),
       });
       if (!writeResult.written) {
         // Surface the gate rejection instead of silently dropping the
@@ -161,46 +212,50 @@ export async function check(input: CheckInput): Promise<CheckResult> {
     }
   }
 
-  // 2b. From palace alignment room — rich correction history agents store there
+  // 2b. From palace alignment room — rich correction history agents store there.
+  // Wave 3a (P0 palace-room KNOWN-GAP closure, 2026-08-30): routed through the
+  // shared, trust-safe FETCH stage (readTierCandidates) instead of this
+  // surface's own raw fs.readdirSync+readFileSync glob — a rescue-tagged room
+  // file's parsed "Human correction"/"Delta" excerpt can no longer be echoed
+  // back through similar_past_deltas. README.md/_room.json are excluded here
+  // (as before) since readTierCandidates includes README.md by default and
+  // _room.json is not a `.md` entry parsed by the `### DATE` pattern below.
   try {
-    const pd = palaceDir(slug);
     const rooms = listRooms(slug);
     const alignmentRoom = rooms.find((r) => r.name.toLowerCase() === "alignment" || r.slug === "alignment");
     if (alignmentRoom) {
-      const alignRoomPath = path.join(pd, "rooms", alignmentRoom.slug);
-      if (fs.existsSync(alignRoomPath)) {
-        const files = fs.readdirSync(alignRoomPath).filter((f) => f.endsWith(".md") && f !== "README.md" && f !== "_room.json");
-        for (const file of files) {
-          const content = fs.readFileSync(path.join(alignRoomPath, file), "utf-8");
-          // Parse entries: ### DATE — CONFIDENCE blocks with Goal + Human correction
-          const entryPattern = /###\s+(\d{4}-\d{2}-\d{2})[^\n]*\n([\s\S]*?)(?=###|\s*$)/g;
-          let match: RegExpExecArray | null;
-          while ((match = entryPattern.exec(content)) !== null) {
-            const date = match[1];
-            const block = match[2];
-            const goalMatch = block.match(/\*\*Goal\*\*:\s*(.+)/);
-            const correctionMatch = block.match(/\*\*Human correction\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
-            const deltaMatch = block.match(/\*\*Delta\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
-            if (!goalMatch) continue;
+      const candidates = readTierCandidates("palace-room", slug, { room: alignmentRoom.slug });
+      for (const candidate of candidates) {
+        if (candidate.file === "README.md") continue;
+        const content = candidate.content;
+        // Parse entries: ### DATE — CONFIDENCE blocks with Goal + Human correction
+        const entryPattern = /###\s+(\d{4}-\d{2}-\d{2})[^\n]*\n([\s\S]*?)(?=###|\s*$)/g;
+        let match: RegExpExecArray | null;
+        while ((match = entryPattern.exec(content)) !== null) {
+          const date = match[1];
+          const block = match[2];
+          const goalMatch = block.match(/\*\*Goal\*\*:\s*(.+)/);
+          const correctionMatch = block.match(/\*\*Human correction\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
+          const deltaMatch = block.match(/\*\*Delta\*\*:\s*([\s\S]+?)(?=\*\*|$)/);
+          if (!goalMatch) continue;
 
-            const pastGoal = goalMatch[1].trim();
-            const correction = correctionMatch?.[1].trim() ?? "";
-            const delta = deltaMatch?.[1].trim() ?? correction;
-            if (!delta) continue;
+          const pastGoal = goalMatch[1].trim();
+          const correction = correctionMatch?.[1].trim() ?? "";
+          const delta = deltaMatch?.[1].trim() ?? correction;
+          if (!delta) continue;
 
-            const pastKeywords = extractKeywords(pastGoal, 5);
-            const overlap = goalKeywords.filter((k) => pastKeywords.some((pk) => pk.includes(k) || k.includes(pk)));
-            // Also check if goal keywords appear in the correction text (broader match)
-            const correctionKeywords = extractKeywords(delta, 5);
-            const correctionOverlap = goalKeywords.filter((k) => correctionKeywords.some((ck) => ck.includes(k) || k.includes(ck)));
+          const pastKeywords = extractKeywords(pastGoal, 5);
+          const overlap = goalKeywords.filter((k) => pastKeywords.some((pk) => pk.includes(k) || k.includes(pk)));
+          // Also check if goal keywords appear in the correction text (broader match)
+          const correctionKeywords = extractKeywords(delta, 5);
+          const correctionOverlap = goalKeywords.filter((k) => correctionKeywords.some((ck) => ck.includes(k) || k.includes(ck)));
 
-            if (overlap.length >= 1 || correctionOverlap.length >= 2) {
-              similarDeltas.push({
-                date,
-                goal: pastGoal.slice(0, 80),
-                delta: delta.slice(0, 200),
-              });
-            }
+          if (overlap.length >= 1 || correctionOverlap.length >= 2) {
+            similarDeltas.push({
+              date,
+              goal: pastGoal.slice(0, 80),
+              delta: delta.slice(0, 200),
+            });
           }
         }
       }
@@ -222,14 +277,34 @@ export async function check(input: CheckInput): Promise<CheckResult> {
       const hasActionSignal = /\b(don't|never|always|must|should|use|avoid|prefer|stop|skip|check|verify|wait|need)\b/i.test(w.pattern);
       if (words.length < 5 || !hasActionSignal) continue;
       try {
+        // W4 fix (2026-08-30, root-cause of the PROJECT_INSIGHT_BUDGET
+        // never-fired gap — session-start.ts's project-scoped insight slot,
+        // :439-474): this call previously omitted BOTH `project` (top-level)
+        // and `source_project` (per-insight) — `awarenessUpdate` derives
+        // `IndexedInsight.projects` from the TOP-LEVEL `project` field only
+        // (see awareness-update.ts's `addIndexedInsight` call: `projects:
+        // input.project ? [input.project] : undefined`), so every insight
+        // auto-promoted here got `projects: undefined` forever and could
+        // never match session-start.ts's `(i.projects ?? []).includes(slug)`
+        // filter. `source_project` separately stamps `Insight.source_project`
+        // in awareness.md's topInsights (palace/awareness.ts's `addInsight`,
+        // defaults to "_global" when omitted) — a different store, same
+        // missing-attribution bug. Matches the exact pattern already used at
+        // session-end.ts:650/653 and smart-remember.ts:226/229 (both pass
+        // `project: slug` top-level AND `source_project: slug` per-insight)
+        // — not an invented convention. `slug` is already resolved above
+        // (line 128). Additive/non-regressing: worst case is correctly
+        // attributing an insight that was previously mis-filed global.
         await awarenessUpdate({
           insights: [{
             title: `Human preference: ${w.pattern.slice(0, 60)}`,
             evidence: `Detected from ${w.frequency} corrections in alignment log`,
             applies_when: w.pattern.split(/[\s\-:()]+/).filter((word: string) => word.length > 3).slice(0, 5),
             source: `check auto-promote ${todayISO()}`,
+            source_project: slug,
             severity: "important",
           }],
+          project: slug,
         });
         autoPromoted++;
       } catch {
@@ -297,6 +372,45 @@ export async function check(input: CheckInput): Promise<CheckResult> {
     }
   }
 
+  // 6. Wave 5: forward anticipation — predict whether this goal is likely to be
+  // corrected, based on the corrections-derived Blind-Spots profile. Pushed as
+  // an early prior. Best-effort: prediction must never break the check flow.
+  let prediction: PredictCorrectionResult | undefined;
+  try {
+    prediction = await predictCorrection({ plan: input.goal, project: slug });
+  } catch {
+    prediction = undefined;
+  }
+  // Over-confidence guard: a high-likelihood prediction against a high-confidence
+  // self-assessment is exactly the mismatch worth flagging before acting.
+  if (prediction && prediction.likelihood === "high" && input.confidence === "high") {
+    const guardLine =
+      "OVER-CONFIDENCE GUARD: a prior correction predicts this plan is likely to be corrected — reconcile first.";
+    calibrationNote = calibrationNote ? `${calibrationNote} ${guardLine}` : guardLine;
+  }
+
+  // 7. C3 (TOW2-329) — fold check_action's pre-action matcher into the default
+  // surface. Only runs when the caller supplied `action_description`; reuses
+  // `checkAction` verbatim (same matching_rules/corrections/insights + verdict
+  // semantics, incl. `blocked` for an authoritative P0 match) so the standalone
+  // check_action tool's capability is reachable through the default 5 tools
+  // without duplicating its matching logic. Best-effort: must never break the
+  // check flow.
+  let actionCheck: CheckActionResult | undefined;
+  const actionDescription = input.action_description?.trim();
+  if (actionDescription) {
+    try {
+      actionCheck = await checkAction({ action_description: actionDescription, project: slug });
+    } catch {
+      actionCheck = undefined;
+    }
+  }
+
+  // C2 — lifecycle telemetry: counters only, never transcript content.
+  // check() has no idempotency-suppression concept (task scope is limited to
+  // session_start/session_end), so dup is always false here.
+  recordLifecycleEvent("check", getSessionId(), slug, false);
+
   return {
     recorded: true,
     project: slug,
@@ -307,5 +421,7 @@ export async function check(input: CheckInput): Promise<CheckResult> {
     decision_trail_saved: decisionTrailSaved || undefined,
     calibration_note: calibrationNote,
     correction_gate_rejected: gateRejection,
+    ...(prediction ? { prediction } : {}),
+    ...(actionCheck ? { action_check: actionCheck } : {}),
   };
 }

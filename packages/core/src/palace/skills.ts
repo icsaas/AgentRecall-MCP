@@ -19,10 +19,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { palaceDir, sanitizeSlug } from "../storage/paths.js";
+import { palaceDir } from "../storage/paths.js";
 import { ensureDir } from "../storage/fs-utils.js";
+import { sanitizeName } from "../storage/sanitize.js";
 import { generateFrontmatter } from "./obsidian.js";
-import { initFsrs, type FsrsState } from "./fsrs.js";
+import { initFsrs, reinforce, score, type FsrsState, type FsrsScore } from "./fsrs.js";
+import { tokenizeWords } from "../helpers/tokenize.js";
+import { scrubForCloud } from "../storage/content-guard.js";
 
 export interface SkillMeta {
   /** Stable kebab-case slug, unique within project. */
@@ -41,6 +44,13 @@ export interface SkillMeta {
   source?: "manual" | "promoted_from_correction" | "promoted_from_pipeline" | "auto_reflection";
   /** Embedded FSRS state for reinforcement-on-use. */
   fsrs?: FsrsState;
+  /**
+   * Wave 3: non-destructive archive flag. Set by the decay pass when a skill's
+   * FSRS retrievability falls into `archive_candidate`. NEVER unlinks the file —
+   * `listSkills` and recall consumers FILTER it out (the flag is live, not inert),
+   * but the lossless content is preserved on disk for audit / revival.
+   */
+  archived?: boolean;
 }
 
 export interface SkillBody {
@@ -91,6 +101,8 @@ function parseFrontmatter(raw: string): { meta: Record<string, unknown>; body: s
       try { meta[key] = JSON.parse(raw); } catch { meta[key] = raw; }
     } else if (raw === "null" || raw === "") {
       meta[key] = null;
+    } else if (raw === "true" || raw === "false") {
+      meta[key] = raw === "true";
     } else if (/^-?\d+(\.\d+)?$/.test(raw)) {
       meta[key] = Number(raw);
     } else {
@@ -122,7 +134,11 @@ export function parseSkillFile(filePath: string): Skill {
   const { meta: m, body } = parseFrontmatter(raw);
 
   const meta: SkillMeta = {
-    slug: String(m.slug ?? path.basename(filePath, ".md").split("-").slice(1).join("-")),
+    // Strip the "NNNN-" or v2 "NNNN--" order prefix to recover the slug when
+    // frontmatter lacks one. A plain split("-").slice(1) would leave a stray
+    // leading "-" on a double-dash filename ("0001--foo" → "-foo"); the regex
+    // strips the whole order-prefix (either delimiter width) in one shot.
+    slug: String(m.slug ?? path.basename(filePath, ".md").replace(/^\d+--?/, "")),
     name: String(m.name ?? ""),
     topic: String(m.topic ?? ""),
     triggers: Array.isArray(m.triggers) ? (m.triggers as string[]) : [],
@@ -131,6 +147,7 @@ export function parseSkillFile(filePath: string): Skill {
     updated: String(m.updated ?? ""),
     source: (m.source as SkillMeta["source"]) ?? "manual",
     fsrs: m.fsrs && typeof m.fsrs === "object" ? (m.fsrs as FsrsState) : undefined,
+    archived: m.archived === true ? true : undefined,
   };
 
   return {
@@ -147,14 +164,25 @@ export function parseSkillFile(filePath: string): Skill {
   };
 }
 
-export function listSkills(project: string): Skill[] {
+/**
+ * List skills for a project.
+ *
+ * Wave 3: archived skills (FSRS `archive_candidate`, flagged by the decay pass)
+ * are FILTERED OUT by default — this is what makes the `archived` flag live
+ * rather than inert. Pass `{ includeArchived: true }` for the decay pass itself
+ * and audit tooling that must see every file on disk.
+ */
+export function listSkills(project: string, opts?: { includeArchived?: boolean }): Skill[] {
   const dir = skillsDir(project);
   if (!fs.existsSync(dir)) return [];
+  const includeArchived = opts?.includeArchived === true;
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md") && /^\d+-/.test(f));
   const skills: Skill[] = [];
   for (const f of files) {
     try {
-      skills.push(parseSkillFile(path.join(dir, f)));
+      const skill = parseSkillFile(path.join(dir, f));
+      if (!includeArchived && skill.meta.archived === true) continue;
+      skills.push(skill);
     } catch {
       // skip unreadable
     }
@@ -183,6 +211,7 @@ function renderSkill(meta: SkillMeta, body: SkillBody): string {
     updated: meta.updated,
     source: meta.source ?? "manual",
     fsrs: meta.fsrs ?? null,
+    ...(meta.archived === true ? { archived: true } : {}),
   });
   const renderList = (xs: string[]) => xs.length ? xs.map((x) => `- ${x}`).join("\n") : "- _(none)_";
   return (
@@ -197,16 +226,66 @@ function renderSkill(meta: SkillMeta, body: SkillBody): string {
   );
 }
 
+/**
+ * Find the existing skill filename at `order`, regardless of which
+ * delimiter it was written with (legacy "NNNN-slug.md" or v2
+ * "NNNN--slug.md"). Rewrite call sites (reinforceSkillFsrs,
+ * setSkillArchived) pass their own `order` back into writeSkill to update an
+ * EXISTING skill in place — if writeSkill always recomputed the filename
+ * with the NEW delimiter/sanitizer, a rewrite of a pre-v2 (single-dash)
+ * skill would silently create a SECOND, v2-named file at the same order
+ * instead of updating the original (the same orphan-duplicate bug fixed in
+ * storage/corrections.ts's findExistingCorrectionFile). Returns undefined
+ * when no file exists yet at this order (the brand-new-skill case).
+ */
+function findExistingSkillFile(dir: string, order: number): string | undefined {
+  if (!fs.existsSync(dir)) return undefined;
+  const prefix = `${zeroPad(order)}-`;
+  try {
+    return fs.readdirSync(dir).find((f) => f.endsWith(".md") && f.startsWith(prefix));
+  } catch {
+    return undefined;
+  }
+}
+
 export function writeSkill(project: string, meta: SkillMeta, body: SkillBody, order?: number): string {
   const dir = skillsDir(project);
   ensureDir(dir);
-  const finalMeta: SkillMeta = {
+  // P0-a (2026-08-18): scrub every free-text field BEFORE slug/filename
+  // derivation and render — mirrors storage/corrections.ts's writeCorrection
+  // fix. `name` (or `slug`) feeds sanitizeName() below whenever `slug` is
+  // absent, so an unscrubbed secret/injection payload in either would leak
+  // into the on-disk FILENAME (the exact leak class corrections.ts had via
+  // slugify(record.rule)) even if content were scrubbed only at render time.
+  // Every body field is otherwise rendered raw to disk with no scrub call
+  // anywhere else in this module, and skills are surfaced unconditionally
+  // into session_start() via recognition-builder.ts's readCapabilities().
+  const scrubbedMeta: SkillMeta = {
     ...meta,
-    slug: sanitizeSlug(meta.slug || meta.name),
+    slug: meta.slug ? scrubForCloud(meta.slug) : meta.slug,
+    name: scrubForCloud(meta.name),
+    topic: scrubForCloud(meta.topic),
+    triggers: meta.triggers.map((t) => scrubForCloud(t)),
+  };
+  const scrubbedBody: SkillBody = {
+    when: scrubForCloud(body.when),
+    preconditions: body.preconditions.map((s) => scrubForCloud(s)),
+    steps: body.steps.map((s) => scrubForCloud(s)),
+    postconditions: body.postconditions.map((s) => scrubForCloud(s)),
+    pitfalls: body.pitfalls?.map((s) => scrubForCloud(s)),
+    evidence: body.evidence?.map((s) => scrubForCloud(s)),
+  };
+  const finalMeta: SkillMeta = {
+    ...scrubbedMeta,
+    slug: sanitizeName(scrubbedMeta.slug || scrubbedMeta.name, 60),
     fsrs: meta.fsrs ?? initFsrs(meta.created || new Date().toISOString()),
+    archived: meta.archived === true ? true : undefined,
   };
   const ord = order ?? nextSkillOrder(project);
-  const filename = `${zeroPad(ord)}-${finalMeta.slug}.md`;
+  // v2 delimiter ("--") for brand-new files; reuse the existing filename
+  // verbatim when rewriting a skill already on disk (see
+  // findExistingSkillFile doc).
+  const filename = findExistingSkillFile(dir, ord) ?? `${zeroPad(ord)}--${finalMeta.slug}.md`;
   const filePath = path.join(dir, filename);
   // Symlink guard
   try {
@@ -217,34 +296,130 @@ export function writeSkill(project: string, meta: SkillMeta, body: SkillBody, or
   }
   // Atomic write
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, renderSkill(finalMeta, body), { encoding: "utf-8", mode: 0o600 });
+  fs.writeFileSync(tmp, renderSkill(finalMeta, scrubbedBody), { encoding: "utf-8", mode: 0o600 });
   fs.renameSync(tmp, filePath);
   return filePath;
+}
+
+/** Parse the numeric order prefix (NN-) from a skill file path. Returns undefined if absent. */
+function orderFromPath(filePath: string): number | undefined {
+  const m = path.basename(filePath).match(/^(\d+)-/);
+  return m ? parseInt(m[1], 10) : undefined;
+}
+
+/** Default throttle window (hours) for reinforce-on-recall write-amplification guard. */
+const REINFORCE_THROTTLE_HOURS = 6;
+
+function hoursSince(iso: string | undefined, now: number): number {
+  if (!iso) return Infinity;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return Infinity;
+  return (now - t) / 3_600_000;
+}
+
+/**
+ * Wave 3: reinforce a skill's FSRS state on a recall hit (revives the dormant
+ * reinforcement loop). Grows stability + bumps confirmations, then atomically
+ * writes back via the existing render path (keeps the file's order prefix).
+ *
+ * - THROTTLED: skips the write if `last_confirmed` is within
+ *   `REINFORCE_THROTTLE_HOURS` to bound write-amplification in git-mirrored
+ *   memory (a hot skill recalled many times in one session writes once).
+ * - BEST-EFFORT: a recall hit must NEVER throw — all errors are swallowed.
+ *
+ * F3 fix (independent review, 2026-07-20): the lookup used to require an
+ * EXACT match between the (now-lowercased) sanitized `slug` and the
+ * filename's slug portion. A legacy skill file written before the v2
+ * sanitizer (which preserved the caller's original case, e.g.
+ * "0005-Cloudflare-DNS-Setup.md") would never match a lowercase `safe`
+ * lookup — the skill silently never got reinforced, so its FSRS
+ * retrievability kept decaying toward `archive_candidate` regardless of how
+ * often it was actually recalled. The comparison is now case-insensitive on
+ * BOTH sides (this call site has no `order` to reuse findExistingSkillFile
+ * directly with — the fallback is a case-insensitive slug match instead;
+ * once the file is found, the REWRITE itself still goes through writeSkill's
+ * order-based findExistingSkillFile, so the on-disk filename is untouched).
+ */
+export function reinforceSkillFsrs(
+  project: string,
+  slug: string,
+  now: string = new Date().toISOString(),
+): void {
+  try {
+    const safe = sanitizeName(slug, 60);
+    const dir = skillsDir(project);
+    if (!fs.existsSync(dir)) return;
+    // /^\d+--?/ strips either delimiter width (legacy single- or v2 double-dash).
+    // Case-insensitive comparison (F3): `safe` is always lowercase (sanitizeName),
+    // but a legacy file's on-disk slug may preserve its original case.
+    const file = fs
+      .readdirSync(dir)
+      .find((f) => f.endsWith(".md") && /^\d+-/.test(f) && f.replace(/^\d+--?/, "").replace(/\.md$/, "").toLowerCase() === safe);
+    if (!file) return;
+    const filePath = path.join(dir, file);
+    const skill = parseSkillFile(filePath);
+    const nowMs = new Date(now).getTime();
+    const nowMsSafe = Number.isNaN(nowMs) ? Date.now() : nowMs;
+
+    const current = skill.meta.fsrs ?? initFsrs(skill.meta.created || now);
+    // Throttle: a same-window second recall must not re-write the file.
+    if (hoursSince(current.last_confirmed, nowMsSafe) < REINFORCE_THROTTLE_HOURS) return;
+
+    const updated: SkillMeta = {
+      ...skill.meta,
+      fsrs: reinforce(current, now),
+      updated: now,
+    };
+    writeSkill(project, updated, skill.body, orderFromPath(filePath));
+  } catch {
+    // Recall must never throw — reinforcement is best-effort.
+  }
+}
+
+/**
+ * Wave 3: set/clear a skill's `archived` flag, preserving its order prefix and
+ * all other content. NEVER unlinks the file (compress invariant). Atomic write
+ * via the existing render path. Best-effort — returns false on any failure.
+ */
+export function setSkillArchived(project: string, skill: Skill, archived: boolean): boolean {
+  try {
+    const updated: SkillMeta = { ...skill.meta, archived: archived ? true : undefined, updated: new Date().toISOString() };
+    writeSkill(project, updated, skill.body, orderFromPath(skill.file_path));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Trigger-match: rank skills by overlap of intent keywords against the skill's
  * declared `triggers` + topic + name. Returns top N. Pure scoring — no LLM call.
+ *
+ * Wave 3: each hit is annotated with `retrievability` + `status` from its FSRS
+ * state (`score`), so callers can surface decay health alongside relevance.
  */
 export function recallSkillsByIntent(
   project: string,
   intent: string,
   limit = 5,
-): Array<{ skill: Skill; score: number; matched_triggers: string[] }> {
+): Array<{ skill: Skill; score: number; matched_triggers: string[]; retrievability: number; status: FsrsScore["status"] }> {
   const skills = listSkills(project);
   if (skills.length === 0) return [];
+  // CJK-aware (P0-b, 2026-08-18): the original `[^a-z0-9 ]+` strip destroyed
+  // every CJK character before splitting (Layer-1 bug, same class as
+  // check-action.ts's original bug) — a Chinese intent/skill-name tokenized
+  // to empty. Shared tokenizer extracts + segments Han runs first, so they
+  // survive; asciiStripRegex reproduces each original punctuation-strip
+  // pattern byte-for-byte on the (now Han-free) ASCII remainder.
   const intentWords = new Set(
-    intent
-      .toLowerCase()
-      .normalize("NFKD")
-      .replace(/[^a-z0-9 ]+/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length >= 3),
+    tokenizeWords(intent, { minLength: 3, asciiStripRegex: /[^a-z0-9 ]+/g }),
   );
   const ranked = skills
     .map((s) => {
       const haystack = [s.meta.name, s.meta.topic, ...s.meta.triggers].join(" ").toLowerCase();
-      const haystackWords = new Set(haystack.split(/[^a-z0-9]+/).filter((w) => w.length >= 3));
+      const haystackWords = new Set(
+        tokenizeWords(haystack, { minLength: 3, asciiStripRegex: /[^a-z0-9]+/g }),
+      );
       const matched: string[] = [];
       let score = 0;
       for (const w of intentWords) {
@@ -257,10 +432,22 @@ export function recallSkillsByIntent(
       for (const t of s.meta.triggers) {
         if (intent.toLowerCase().includes(t.toLowerCase())) score += 1;
       }
-      return { skill: s, score, matched_triggers: matched };
+      const fsrsScore = score_(s.meta);
+      return {
+        skill: s,
+        score,
+        matched_triggers: matched,
+        retrievability: fsrsScore.retrievability,
+        status: fsrsScore.status,
+      };
     })
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
   return ranked;
+}
+
+/** Compute FSRS score for a skill, backfilling missing state via initFsrs lazily. */
+function score_(meta: SkillMeta): FsrsScore {
+  return score(meta.fsrs ?? initFsrs(meta.created || new Date().toISOString()));
 }

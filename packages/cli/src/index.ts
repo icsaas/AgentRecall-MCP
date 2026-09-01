@@ -5,6 +5,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { VERSION, setRoot } from "agent-recall-core";
 import type { Importance, WalkDepth } from "agent-recall-core";
+import { detectCorrection } from "./utils/correction-detector.js";
+import {
+  extractTopicKeywords,
+  loadProfile as loadTopicProfile,
+  computeDecayedProfile,
+  profileOnlyTerms,
+  topicQuery,
+  appendTurn as appendTopicTurn,
+  sweepStaleProfiles,
+} from "./utils/topic-state.js";
 
 const args = process.argv.slice(2);
 
@@ -31,6 +41,20 @@ function getFlag(flag: string, flagArgs: string[]): string | undefined {
 
 function hasFlag(flag: string, flagArgs: string[]): boolean {
   return flagArgs.includes(flag);
+}
+
+/**
+ * L2 fix (review, 2026-07-31): word-boundary truncation with an ellipsis,
+ * matching the MCP-server's `trunc()` (packages/mcp-server/src/tools/
+ * session-start.ts). The continuity block previously used a bare
+ * `.slice(0, n)` — no word boundary, no ellipsis marker — unlike its MCP
+ * sibling rendering the SAME field.
+ */
+function truncWordBoundary(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const sliced = s.slice(0, n);
+  const lastSpace = sliced.lastIndexOf(" ");
+  return (lastSpace > n * 0.6 ? sliced.slice(0, lastSpace) : sliced) + "…";
 }
 
 function output(data: unknown): void {
@@ -83,14 +107,54 @@ DIGEST (context cache):
 
 META:
   ar projects
+  ar status [--json]   Project status board (human table by default; --json for structured data)
   ar synthesize [--entries N] [--focus full|decisions|blockers|goals] [--no-palace] [--consolidate]
   ar knowledge write --category <cat> --title "t" --what "w" --cause "c" --fix "f" [--severity critical|important|minor]
   ar knowledge read [--category <cat>]
 
+OUTCOMES (dream-audit verdicts — C3b):
+  ar outcomes audit-candidates [--project <slug>] [--date YYYY-MM-DD]
+      List corrections retrieved on that date with no verdict yet (JSON array).
+      Default date: yesterday. Output: [{id, rule, severity, tags, retrieved_date, journal_file_paths}]
+  ar outcomes record --project <slug> --id <correction-id> --kind not_triggered|recurred|heeded --evidence "<text>" [--audit-date YYYY-MM-DD]
+      Record a dream-audit verdict. Evidence string is prefixed "dream-audit:".
+      not_triggered is ONLY accepted from this path (enforced). 1/day dedup on audit-date.
+      --audit-date defaults to yesterday; pass matching value from audit-candidates retrieved_date.
+  ar outcomes --help
+      Show detailed help with agent instructions.
+
 DIAGNOSTICS:
+  ar scrub [--check]   Scrub stdin through the fail-CLOSED export guard and write to stdout.
+      Default: stdin → scrubbed content on stdout; exit 0 (clean/redacted), 2 (secret survived scrub).
+      Fail-OPEN (NOT scanned): Authorization: Bearer <token> headers — do not rely on ar scrub for JWT redaction.
+      --check: no output rewrite — exit 0 (clean), 1 (secrets found and scrubbable), 2 (scrub-resistant residue).
+        Fail-OPEN (NOT scanned): Authorization: Bearer <token> headers — do not rely on ar scrub for JWT redaction.
+        A --check exit 0 does NOT clear Bearer tokens.
+      Fail-closed pattern classes: AKIA (AWS), ghp_/gho_/ghs_/github_pat_/ghr_ (GitHub), sk- (OpenAI/Anthropic),
+        xoxb-/xoxp- (Slack), npm_, _authToken, PEM private key/certificate blocks.
   ar stats             Show memory system health: corrections, feedback, insights, graph edges
+  ar corrections rejected [--stats] [--json]  Survivorship-bias probe: corrections the capture gate discarded
+  ar corrections export [--all-projects] [--include-retracted] [--since YYYY-MM-DD] [--to-backend]
+      Vendor-neutral, fail-closed-scrubbed export. Without --to-backend: JSON to stdout (pipe to an adapter).
+      With --to-backend: push to the MemoryBackend selected by AR_MEMORY_BACKEND env var (e.g. local-archive).
+  ar mirror [--json]   The Mirror: first-person, citation-backed self-model from your real corrections/insights (personal-tier, local-only; omit --project for the cross-project mirror)
+  ar doctor [--json]   READ-ONLY store integrity check: index drift, stale locks, stalled consolidation seam
+  ar repair [--apply] [--json]  Remediate doctor findings (DRY-RUN unless --apply): reindex drift, remove dead locks, login-free drain
+  ar hygiene [--json] [--project <slug>] [--baseline-update]
+      DETECTION-ONLY store trash audit — junk project dirs, unbounded counter files, recurring-theme
+      epidemics, case-fold forks, stale derived caches, root-level secret-shaped strings, missing
+      corrections indexes, reserved-word slug collisions. NEVER mutates the store; the only write this
+      command can make is its own baseline file, and only with --baseline-update.
+      First run: \`ar hygiene --baseline-update\` to seed the baseline against everything already there.
+      Every later bare run reports only NEW findings since that baseline; exit 1 only on a NEW red finding.
   ar rooms             Show palace rooms with entry counts and topic keywords
   ar sync-memory       Sync AgentRecall → Claude auto-memory (corrections + insights + rooms)
+  ar health [--json]   Fail-loud hook health (continuity wave): recent hook failures (24h count + last
+      failure), written by recordHookFailure() from every hook catch block. Empty state exits 0.
+  ar resurrect [query] [--days N] [--json]
+      Read-only cross-slug dead-session finder — recency + keyword ranked across recent-sessions.jsonl,
+      raw archive dumps, and session cards. No query = pure recency. --days (default 14): scan window.
+      --json: raw ContinuityBrief[] instead of the markdown brief. Empty result → helpful message, exit 0.
 
 BOOTSTRAP:
   ar bootstrap               Scan machine for projects and show summary card
@@ -138,6 +202,21 @@ async function main(): Promise<void> {
   const core = await import("agent-recall-core");
   const project = globalProject;
 
+  // P1 fence (TOW2-388, class-sweep follow-up): shared helper for CLI
+  // hookless-host commands whose ONLY output mode surfaces retrieved/stored
+  // memory content (journal/palace/knowledge/corrections/insights text) —
+  // these commands have no separate `--json` machine-consumption contract to
+  // preserve (unlike e.g. `ar awareness read --json` / `ar mirror --json`,
+  // which stay unfenced by established precedent so scripts can still
+  // `JSON.parse` them), so fencing the whole rendered payload here matches
+  // the MCP smart-recall.ts precedent: fenceMemory(JSON.stringify(result)).
+  // Never call this for a command that also serves a documented `--json`
+  // machine-parseable contract — fencing there would corrupt valid JSON.
+  function outputFenced(data: unknown): void {
+    const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    output(core.fenceMemory(text));
+  }
+
   switch (command) {
     case "read": {
       const result = await core.journalRead({
@@ -145,7 +224,10 @@ async function main(): Promise<void> {
         section: getFlag("--section", rest) ?? "all",
         project,
       });
-      output(result);
+      // P1 fence (class-sweep): `content` is raw journal prose, up to 20000
+      // chars — the CLI hookless-host equivalent of the fenced `agent-recall://`
+      // journal resource / recall() excerpts.
+      outputFenced(result);
       break;
     }
     case "write": {
@@ -155,6 +237,7 @@ async function main(): Promise<void> {
         section: getFlag("--section", rest),
         palace_room: getFlag("--palace-room", rest),
         project,
+        saveType: "arsave",
       });
       output(result);
       break;
@@ -181,7 +264,9 @@ async function main(): Promise<void> {
         project,
         limit: limit ? parseInt(limit) : 10,
       });
-      output(result);
+      // P1 fence (class-sweep): `entries[].title` is extracted verbatim from
+      // journal file content (first `# heading` line) — real retrieved prose.
+      outputFenced(result);
       break;
     }
     case "search": {
@@ -192,8 +277,11 @@ async function main(): Promise<void> {
         section: getFlag("--section", rest),
         include_palace: hasFlag("--include-palace", rest),
       });
-      output(result);
-      // Print advisory note to stderr (keeps stdout clean for piping)
+      // P1 fence (class-sweep): `results[].excerpt` quotes journal + palace
+      // content verbatim — the CLI hookless-host equivalent of recall()'s
+      // fenced result list. `_note` is AR's own advisory text (not retrieved
+      // memory) and is printed separately to stderr, outside the fence.
+      outputFenced(result);
       if (result._note) {
         process.stderr.write(`\n[ar] ${result._note}\n`);
       }
@@ -209,12 +297,27 @@ async function main(): Promise<void> {
         date: getFlag("--date", rest) ?? "latest",
         project,
       });
-      output(result);
+      // P1 fence (class-sweep): a "read" returns the raw SessionState —
+      // completed/failures/insights/next_actions/state/counts are all
+      // free-text fields a PRIOR (possibly compromised) session wrote via
+      // `ar state write`. A "write" only echoes back THIS call's own counts
+      // (not retrieved memory), so it stays unfenced.
+      if (action === "read") {
+        outputFenced(result);
+      } else {
+        output(result);
+      }
       break;
     }
     case "cold-start": {
       const result = await core.journalColdStart({ project });
-      output(result);
+      // P1 fence (TOW2-388): named fix — `ar cold-start` is AGENTS.md's
+      // documented hookless-host CLI equivalent of the `session_start` MCP
+      // tool (already fenced in session-start.ts). The entire payload
+      // (p0_corrections, trajectory, awareness_summary, top_rooms, cache
+      // entries) is retrieved/stored memory — same rationale as
+      // smart-recall.ts's whole-blob fence.
+      outputFenced(result);
       break;
     }
     case "archive": {
@@ -223,7 +326,11 @@ async function main(): Promise<void> {
         older_than_days: days ? parseInt(days) : 7,
         project,
       });
-      output(result);
+      // P1 fence (completeness-harness find, 2026-08-19): `summaries[]`
+      // quotes the first line of each archived entry's own stored Brief
+      // section verbatim — genuinely retrieved memory, not administrative
+      // counts alone. Missed by all three prior hand-enumeration passes.
+      outputFenced(result);
       break;
     }
     case "rollup": {
@@ -235,12 +342,36 @@ async function main(): Promise<void> {
         dry_run: hasFlag("--dry-run", rest),
         project,
       });
-      output(result);
+      // P1 fence (completeness-harness find, 2026-08-19): `summariesCreated[]`
+      // is synthesizeWeek()'s output — quotes journal decisions/blockers/
+      // completed/next-step text verbatim. Missed by all three prior
+      // hand-enumeration passes (this command has no direct MCP tool
+      // equivalent to have caught it "for parity").
+      outputFenced(result);
       break;
     }
     case "projects": {
       const result = await core.journalProjects();
       output(result);
+      break;
+    }
+    case "status": {
+      const board = await core.projectBoard();
+      if (hasFlag("--json", rest)) {
+        // Not fenced: established `--json` precedent (raw machine-parseable
+        // contract), same as `ar awareness read --json` / `ar mirror --json`.
+        output(board);
+      } else {
+        const boardWidth = process.stdout.columns
+          ? Math.min(110, Math.max(80, process.stdout.columns))
+          : 100;
+        // P1 fence (completeness-harness find, 2026-08-19): each project
+        // row's detail column is extractNext()'s output — the journal's
+        // `## Next` section (or `## Brief` first line) quoted verbatim
+        // across EVERY project on the board. Missed by all three prior
+        // hand-enumeration passes.
+        output(core.fenceMemory(core.renderBoard(board, { boardWidth })));
+      }
       break;
     }
     case "palace": {
@@ -254,7 +385,10 @@ async function main(): Promise<void> {
             topic: getFlag("--topic", palaceRest),
             project,
           });
-          output(result);
+          // P1 fence (class-sweep): `content` is raw palace room markdown
+          // (up to 20000 chars) — the CLI hookless-host equivalent of the
+          // fenced palace/awareness resources.
+          outputFenced(result);
           break;
         }
         case "write": {
@@ -295,7 +429,9 @@ async function main(): Promise<void> {
             focus: getFlag("--focus", palaceRest),
             project,
           });
-          output(result);
+          // P1 fence (class-sweep): `content` is identity + awareness +
+          // room narrative text assembled from stored palace content.
+          outputFenced(result);
           break;
         }
         case "search": {
@@ -305,7 +441,9 @@ async function main(): Promise<void> {
             room: getFlag("--room", palaceRest),
             project,
           });
-          output(result);
+          // P1 fence (class-sweep): `results[].excerpt` quotes palace room
+          // content verbatim.
+          outputFenced(result);
           break;
         }
         case "lint": {
@@ -328,8 +466,11 @@ async function main(): Promise<void> {
         if (hasFlag("--json", rest)) {
           output(core.readAwarenessState());
         } else {
+          // P1 fence (TOW2-388): raw awareness.md content, printed directly
+          // to stdout for a human/agent to read or pipe onward — same
+          // surfacing class as the MCP awareness resource.
           const content = core.readAwareness();
-          output(content || "(no awareness file)");
+          output(content ? core.fenceMemory(content) : "(no awareness file)");
         }
       } else if (sub === "update") {
         const result = await core.awarenessUpdate({
@@ -361,11 +502,16 @@ async function main(): Promise<void> {
           if (promoted.length === 0) {
             process.stdout.write(`No new insights to promote (threshold: ${threshold}).\n`);
           } else {
-            process.stdout.write(`Promoted ${promoted.length} insight(s) to awareness:\n`);
-            for (const title of promoted) {
-              process.stdout.write(`  \u2022 ${title}\n`);
-            }
-            process.stdout.write(`Skipped ${skipped.length} (already in awareness or below threshold).\n`);
+            // P1 fence (class-sweep): `promoted` titles are stored insight
+            // text crossing the confirmation threshold \u2014 genuine retrieved
+            // memory, fenced as one block (header + footer commingled,
+            // same tradeoff as check-action.ts's warningLines block).
+            const rollupLines = [
+              `Promoted ${promoted.length} insight(s) to awareness:`,
+              ...promoted.map((title) => `  \u2022 ${title}`),
+              `Skipped ${skipped.length} (already in awareness or below threshold).`,
+            ];
+            process.stdout.write(core.fenceMemory(rollupLines.join("\n")) + "\n");
           }
         } catch (e: unknown) {
           const message = e instanceof Error ? e.message : String(e);
@@ -390,13 +536,22 @@ async function main(): Promise<void> {
           project: insightProject,
           limit: limit ? parseInt(limit) : 5,
         });
-        output(result);
+        // P1 fence (TOW2-388): named fix — `ar recall`/`ar insight` (project
+        // branch) is AGENTS.md's documented hookless-host CLI equivalent of
+        // the `recall` MCP tool, which routes through the SAME smartRecall()
+        // and is already fenced (recall.ts). Whole payload is retrieved
+        // memory — same rationale as smart-recall.ts's whole-blob fence.
+        outputFenced(result);
       } else {
         const result = await core.recallInsight({
           context,
           limit: limit ? parseInt(limit) : 5,
         });
-        output(result);
+        // P1 fence (TOW2-388): named fix — the non-project branch routes
+        // through core.recallInsight(), the same function the (unregistered,
+        // parity-fenced) recall_insight MCP tool uses. `awareness` here is
+        // the same up-to-200-line awareness.md dump recall-insight.ts fences.
+        outputFenced(result);
       }
       break;
     }
@@ -411,7 +566,394 @@ async function main(): Promise<void> {
         consolidate: hasFlag("--consolidate", rest),
         project,
       });
-      output(result);
+      // P1 fence (class-sweep): `synthesis` quotes journal decisions/blockers/
+      // goals/observations verbatim — a full memory digest, same class as
+      // context-synthesize's (unregistered) MCP tool would surface.
+      outputFenced(result);
+      break;
+    }
+    case "consolidate": {
+      // L2: LOGIN-FREE / LLM-FREE safety pass. `ar consolidate --safety` runs the
+      // three background safety steps (decay, prune the unbounded raw archive,
+      // graduate above-threshold crystallization candidates) directly — NO Claude
+      // login, NO OpenAI key, NO async-queue dependency. `--dry-run` computes
+      // counts but writes nothing.
+      if (hasFlag("--safety", rest)) {
+        const slug = await core.resolveProject(project);
+        const result = await core.runSafetyConsolidation(slug, {
+          dryRun: hasFlag("--dry-run", rest),
+        });
+        // P1 fence (class-sweep): `graduated.graduatedTitles` are stored
+        // insight titles crossing the crystallization threshold.
+        outputFenced(result);
+        break;
+      }
+
+      // Wave 5: in-repo replacement for the external ~/.aam consolidation prompt.
+      // Surfaces the versioned consolidation prompt + decay report + crystallization
+      // candidates + DRAFT skill proposals. INVOCABLE ONLY — no cron created.
+      // runDecayPass defaults to --dry-run; pass --apply to actually flag archives.
+      const slug = await core.resolveProject(project);
+      const dryRun = !hasFlag("--apply", rest);
+      let decay = null;
+      try {
+        decay = core.runDecayPass(slug, { dryRun });
+      } catch {
+        decay = null;
+      }
+      const reflect = await core.sessionEndReflect({ project: slug });
+      const prompt = core.buildConsolidationPrompt(slug, reflect.bundle);
+      let candidates: import("agent-recall-core").CrystallizationCandidate[] = [];
+      try {
+        candidates = core.findCrystallizationCandidates();
+      } catch {
+        candidates = [];
+      }
+      let drafts: import("agent-recall-core").ProposedSkill[] = [];
+      try {
+        drafts = await core.proposeSkillsFromPhases(slug);
+      } catch {
+        drafts = [];
+      }
+      // P1 fence (class-sweep): `prompt` is an LLM-directed prompt literally
+      // built to be pasted into/read by an agent, quoting journal excerpts +
+      // correction rule text + phase syntheses verbatim; `crystallization_candidates`
+      // carries insight_titles, `skill_drafts` carries how_solved/synthesis-
+      // derived step text. The whole payload is memory-derived — fence it.
+      outputFenced({
+        project: slug,
+        dry_run: dryRun,
+        decay,
+        crystallization_candidates: candidates,
+        skill_drafts: drafts,
+        prompt,
+      });
+      break;
+    }
+    case "blind-spots": {
+      // Wave 5: read or recompute the corrections-derived behavioral profile.
+      // The profile lives in the PERSONAL tier (sync-excluded). INVOCABLE ONLY.
+      const slug = await core.resolveProject(project);
+      if (hasFlag("--recompute", rest)) {
+        const profile = core.recomputeBlindSpots(slug);
+        // P1 fence (class-sweep): `blind_spots[].tendency`/`.example_rule`
+        // are prose derived directly from correction/alignment text.
+        outputFenced(profile);
+      } else {
+        const profile = core.readBlindSpots(slug);
+        if (profile) {
+          outputFenced(profile);
+        } else {
+          output("none yet — run `ar blind-spots --recompute` after corrections accumulate");
+        }
+      }
+      break;
+    }
+    case "corrections": {
+      const sub = rest[0];
+      switch (sub) {
+        case "rejected": {
+          // Survivorship-bias probe — READ-ONLY view of corrections the capture
+          // gate discarded (corrections/_rejected.jsonl). `--stats` aggregates
+          // discard count, rate (vs. accepted), and top reasons. `--json` raw.
+          const slug = await core.resolveProject(project);
+          const accepted = core.readCorrections(slug).length;
+          if (hasFlag("--stats", rest) || rest.length === 1) {
+            const stats = core.getRejectedStats(slug, accepted);
+            if (hasFlag("--json", rest)) {
+              output(stats);
+            } else {
+              const lines: string[] = [
+                `discarded corrections (${slug}): ${stats.discarded}`,
+                `accepted: ${stats.accepted ?? "?"}`,
+                stats.rate !== undefined
+                  ? `discard rate: ${(stats.rate * 100).toFixed(1)}% (${stats.discarded}/${(stats.accepted ?? 0) + stats.discarded})`
+                  : `discard rate: unknown (accepted count unavailable)`,
+              ];
+              if (stats.top_reasons.length > 0) {
+                lines.push("top reasons:");
+                for (const r of stats.top_reasons) {
+                  lines.push(`  ${r.count}× ${r.reason}`);
+                }
+              } else {
+                lines.push("no rejections logged yet");
+              }
+              output(lines.join("\n"));
+            }
+          } else {
+            // List raw rows. P1 fence (class-sweep): `rule`/`context` are the
+            // original attempted-correction text that the capture gate
+            // REJECTED — still viewable raw here, so still a live injection
+            // vector if replayed into an agent's context. `--stats` above
+            // (reason labels only, gate-generated categorical strings, never
+            // user-authored) is intentionally left unfenced.
+            outputFenced(core.readRejectedCorrections(slug));
+          }
+          break;
+        }
+        case "export": {
+          // Vendor-neutral, fail-closed-scrubbed export of corrections — the one
+          // supported egress contract for external memory backends. Active-only +
+          // current project by default; --all-projects / --include-retracted / --since widen it.
+          // --to-backend: instead of printing JSON to stdout, push to the configured
+          //   MemoryBackend (AR_MEMORY_BACKEND env selects the backend). Prints a
+          //   summary of accepted/rejected counts. Explicit invocation only — no
+          //   automatic sync in this version.
+          const allProjects = hasFlag("--all-projects", rest);
+          const includeRetracted = hasFlag("--include-retracted", rest);
+          const toBackend = hasFlag("--to-backend", rest);
+          const since = getFlag("--since", rest);
+          if (since !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
+            process.stderr.write(`Invalid --since "${since}" — expected YYYY-MM-DD\n`);
+            process.exitCode = 1;
+            break;
+          }
+          const opts: Parameters<typeof core.exportCorrections>[0] = {
+            ...(includeRetracted ? { includeRetracted: true } : {}),
+            ...(since ? { since } : {}),
+          };
+          if (!allProjects) {
+            opts.project = await core.resolveProject(project);
+          }
+          try {
+            const rows = core.exportCorrections(opts);
+            // Non-blocking heads-up before a broad dump (stderr — does not pollute the JSON pipe).
+            if (allProjects) {
+              const projCount = new Set(rows.map((r) => r.project)).size;
+              process.stderr.write(`[ar] exporting ${rows.length} corrections across ${projCount} projects (retracted: ${includeRetracted ? "yes" : "no"})\n`);
+            }
+
+            if (toBackend) {
+              // Push to the configured MemoryBackend instead of printing JSON.
+              const backend = await core.getMemoryBackend();
+              if (!(await backend.available())) {
+                process.stderr.write(
+                  `[ar] no memory backend configured — set AR_MEMORY_BACKEND (e.g. local-archive) and retry\n`
+                );
+                process.exitCode = 1;
+                break;
+              }
+              process.stderr.write(`[ar] pushing ${rows.length} corrections to backend: ${backend.name()}\n`);
+              const result = await backend.retain(rows);
+              output({
+                backend: backend.name(),
+                submitted: rows.length,
+                accepted: result.accepted.length,
+                rejected: result.rejected.length,
+                rejected_detail: result.rejected,
+              });
+              if (result.rejected.length > 0) {
+                process.stderr.write(
+                  `[ar] warning: ${result.rejected.length} record(s) rejected by backend\n`
+                );
+                // Non-zero exit when ANY record was rejected so scripts can gate on it.
+                process.exitCode = 1;
+              }
+            } else {
+              // Always machine-readable: this output is meant to be piped into an adapter.
+              output(rows);
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            process.stderr.write(`Export aborted (fail-closed): ${msg}\n`);
+            process.exitCode = 1;
+          }
+          break;
+        }
+        default:
+          process.stderr.write(`Unknown corrections subcommand: ${sub ?? "(none)"}\nUsage:\n  ar corrections rejected [--stats] [--json]\n  ar corrections export [--all-projects] [--include-retracted] [--since YYYY-MM-DD] [--to-backend]\n`);
+          process.exitCode = 1;
+      }
+      break;
+    }
+    case "doctor": {
+      // READ-ONLY store integrity diagnostics (sibling to `palace lint`).
+      // Never mutates, never acquires a lock. `--json` for the full payload.
+      const result = core.runStoreDoctor();
+      if (hasFlag("--json", rest)) {
+        output(result);
+      } else {
+        const icon = result.status === "red" ? "⛔" : result.status === "warn" ? "⚠" : "✓";
+        const lines: string[] = [`${icon} store-doctor: ${result.status.toUpperCase()}`];
+        for (const c of result.checks) {
+          const mark = c.level === "red" ? "⛔" : c.level === "warn" ? "⚠" : "·";
+          lines.push(`  ${mark} ${c.name} [${c.level}] — ${c.detail}`);
+          if (c.level !== "ok" && c.fix_hint) lines.push(`      fix: ${c.fix_hint}`);
+        }
+        output(lines.join("\n"));
+      }
+      // Non-zero exit on red so scripts/CI can gate on it; warn/ok exit 0.
+      if (result.status === "red") process.exitCode = 1;
+      break;
+    }
+    case "repair": {
+      // WRITE-side remediation of store-doctor findings (sibling to `doctor`).
+      // DRY-RUN by default — pass `--apply` to actually mutate. Reindexes drifted
+      // projects, removes dead locks, runs the login-free consolidation drain.
+      const apply = hasFlag("--apply", rest);
+      const result = await core.runStoreRepair({ apply });
+      if (hasFlag("--json", rest)) {
+        output(result);
+      } else {
+        const lines: string[] = [core.storeRepairSummary(result)];
+        if (result.reindexed.projects.length)
+          lines.push(`  reindex: ${result.reindexed.projects.join(", ")}`);
+        if (result.locksRemoved.names.length)
+          lines.push(`  locks:   ${result.locksRemoved.names.join(", ")}`);
+        if (result.drained.projects.length)
+          lines.push(`  drain:   ${result.drained.projects.join(", ")}`);
+        // Surface any per-step error so a clean-looking summary never hides a failure.
+        for (const [label, step] of [
+          ["reindex", result.reindexed],
+          ["locks", result.locksRemoved],
+          ["drain", result.drained],
+        ] as const) {
+          if (step.error) lines.push(`  ⚠ ${label} error: ${step.error}`);
+        }
+        if (!apply) lines.push("  (dry-run — pass --apply to make these changes)");
+        output(lines.join("\n"));
+      }
+      break;
+    }
+    case "hygiene": {
+      // DETECTION-ONLY store trash audit (sibling to `doctor`/`repair`, but a
+      // different axis: trash, not structural integrity). NEVER mutates the
+      // store — its only possible write is its own baseline file, and only
+      // when --baseline-update is passed.
+      const root = core.getRoot();
+      const baselinePath = core.hygieneBaselinePath(root);
+      const scan = core.runHygieneScan(root);
+      const projectFilter = project ? project.toLowerCase() : undefined;
+      const inScope = (f: { path: string }): boolean =>
+        !projectFilter || f.path.toLowerCase().startsWith(`projects/${projectFilter}`);
+      const countsByCheck = (list: Array<{ check: string }>): Record<string, number> => {
+        const out: Record<string, number> = {};
+        for (const f of list) out[f.check] = (out[f.check] ?? 0) + 1;
+        return out;
+      };
+
+      if (hasFlag("--baseline-update", rest)) {
+        const baseline = core.updateBaseline(scan.findings, baselinePath);
+        const scopedKnown = scan.findings.filter(inScope);
+        if (hasFlag("--json", rest)) {
+          output({
+            grade: scan.grade,
+            counts: projectFilter ? countsByCheck(scopedKnown) : scan.counts,
+            fresh: [],
+            known: scopedKnown,
+            baseline_updated: true,
+            baseline_count: baseline.stable_ids.length,
+          });
+        } else {
+          output(
+            `baseline recorded: ${baseline.stable_ids.length} finding(s) → ${baselinePath}\n` +
+            `  (run \`ar hygiene\` from now on — only NEW findings will be reported)`,
+          );
+        }
+        break;
+      }
+
+      const { fresh, known } = core.applyBaseline(scan.findings, baselinePath);
+      const scopedFresh = fresh.filter(inScope);
+      const scopedKnown = known.filter(inScope);
+
+      if (hasFlag("--json", rest)) {
+        output({
+          grade: scan.grade,
+          counts: projectFilter ? countsByCheck([...scopedFresh, ...scopedKnown]) : scan.counts,
+          fresh: scopedFresh,
+          known_count: scopedKnown.length,
+          baseline_updated: false,
+        });
+      } else {
+        const icon = scan.grade === "red" ? "⛔" : scan.grade === "yellow" ? "⚠" : "✓";
+        const lines: string[] = [`${icon} hygiene: ${scan.grade.toUpperCase()}`];
+        if (scopedFresh.length === 0) {
+          lines.push("  no NEW findings since baseline");
+        } else {
+          lines.push("  NEW findings:");
+          const byCheck = new Map<string, typeof scopedFresh>();
+          for (const f of scopedFresh) {
+            const arr = byCheck.get(f.check) ?? [];
+            arr.push(f);
+            byCheck.set(f.check, arr);
+          }
+          for (const [checkName, items] of byCheck) {
+            for (const item of items) {
+              const mark = item.severity === "red" ? "⛔" : "⚠";
+              lines.push(`  ${mark} ${checkName} [${item.severity}] ${item.path} — ${item.evidence}`);
+              lines.push(`      agent_instruction: ${item.agent_instruction}`);
+            }
+          }
+        }
+        lines.push(`  ${scopedKnown.length} known finding(s) in baseline`);
+        if (!fs.existsSync(baselinePath)) {
+          lines.push("  (no baseline yet — run `ar hygiene --baseline-update` once to seed it)");
+        }
+        output(lines.join("\n"));
+      }
+
+      // Cron-friendly: exit 1 only on a NEW (post-baseline) red finding.
+      // Baseline-known findings and yellow findings never fail the run.
+      if (scopedFresh.some((f) => f.severity === "red")) process.exitCode = 1;
+      break;
+    }
+    case "mirror": {
+      // Loop 9 — The Mirror. A VISIBLE, CORRECTABLE first-person self-model
+      // assembled deterministically + LOCALLY from REAL stored data (personal
+      // tier: corrections, blind-spots, awareness insights, cross-project
+      // patterns). Every rendered line cites the real records it derives from;
+      // it NEVER fabricates a trait and carries an explicit fallibility caveat.
+      // No --project ⇒ the cross-project ("_global") mirror.
+      const reflection = core.buildMirror(project);
+      if (hasFlag("--json", rest)) {
+        // Established precedent (awareness --json / resurrect --json): a
+        // documented machine-parseable contract stays unfenced — wrapping it
+        // would corrupt valid JSON for scripts that pipe/jq this output.
+        output(reflection);
+      } else {
+        // P1 fence (class-sweep): rendered mirror text quotes correction/
+        // blind-spot/insight prose verbatim — a self-model an attacker could
+        // poison via a planted correction, then have replayed as "what I've
+        // learned about how you think".
+        output(core.fenceMemory(core.renderMirror(reflection)));
+      }
+      break;
+    }
+    case "health": {
+      // F5 — fail-loud hook health (continuity wave 2026-07-31). Human-readable
+      // by default; --json for the raw HookHealthState. Always exit 0 — this
+      // is a diagnostic read, not a gate (never exitCode=1, even when failures
+      // exist: `ar doctor`/`ar hygiene` are the commands that gate CI on red).
+      const health = core.readHookHealth();
+      if (hasFlag("--json", rest)) {
+        output(health);
+      } else if (!health.last_failure && health.failures_24h === 0) {
+        output("✓ hook health: no failures recorded.");
+      } else {
+        const lines: string[] = [`Hook health — ${health.failures_24h} failure(s) in the last 24h`];
+        if (health.last_failure) {
+          lines.push(`  last: [${health.last_failure.hook}] ${health.last_failure.ts} — ${health.last_failure.message}`);
+        }
+        output(lines.join("\n"));
+      }
+      break;
+    }
+    case "resurrect": {
+      // F6 — read-only cross-slug dead-session finder (continuity wave
+      // 2026-07-31). No query = pure recency. `renderResurrectMarkdown`
+      // already renders a helpful "nothing found" message for an empty
+      // result set, so the non-JSON branch never needs its own empty-check.
+      const query = rest.filter((a) => !a.startsWith("--")).join(" ") || undefined;
+      const daysFlag = getFlag("--days", rest);
+      const parsedDays = daysFlag ? parseInt(daysFlag, 10) : NaN;
+      const days = Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : undefined;
+      const briefs = core.resurrect({ query, days });
+      if (hasFlag("--json", rest)) {
+        output(briefs);
+      } else {
+        output(core.renderResurrectMarkdown(briefs));
+      }
       break;
     }
     case "knowledge": {
@@ -436,7 +978,11 @@ async function main(): Promise<void> {
           category: getFlag("--category", knRest),
           query: getFlag("--query", knRest),
         });
-        output(result);
+        // P1 fence (class-sweep): raw Q&A content (title/what_happened/
+        // root_cause/fix) — remember.ts's MCP description asserts
+        // "knowledge/ is write-only, not surfaced by recall or session_start",
+        // but this CLI command IS a direct surfacing path for a hookless host.
+        outputFenced(result);
       } else {
         process.stderr.write(`Unknown knowledge subcommand: ${sub}\n`);
         process.exit(1);
@@ -449,7 +995,12 @@ async function main(): Promise<void> {
       // Fires once per session via SessionStart hook.
       // Loads context and surfaces watch_for warnings for the agent.
       // Uses a per-session lock file to avoid double-firing.
-      const lockDir = path.join(os.homedir(), ".agent-recall");
+      // Root-fix (2026-08-12, followups wave): was os.homedir()+".agent-recall"
+      // literal — same bypass class as supabase/sync.ts's logSyncError fix
+      // (2026-07-31). core.getRoot() honors AGENT_RECALL_ROOT/setRoot()/--root
+      // and falls back to the identical os.homedir()/.agent-recall default, so
+      // this is a pure superset fix.
+      const lockDir = core.getRoot();
       const lockFile = path.join(lockDir, ".hook-start-lock");
       const sessionId = process.env.CLAUDE_SESSION_ID ?? process.env.SESSION_ID ?? "";
       const lockKey = sessionId || new Date().toISOString().slice(0, 13); // hour-granularity fallback
@@ -463,8 +1014,75 @@ async function main(): Promise<void> {
       } catch { /* non-blocking */ }
 
       try {
-        const result = await core.sessionStart({ project });
-        const lines: string[] = ["[AgentRecall] Session context loaded"];
+        // v3.4.42 working-memory wave: `sessionId` (env-var derived, above)
+        // is the closest available stand-in for "this session's own Claude
+        // Code session id" at this call site — hook-start does not parse
+        // stdin at all today (verified — this case reads no stdin), so there
+        // is no `session_id` field to pull from a payload here. This is the
+        // SAME lookup hook-end/hook-ambient already use as their own sid
+        // fallback, reused here purely so session-start.ts's WM "live" line
+        // can exclude THIS session's own working-memory file from the
+        // cross-window signal (see SessionStartInput.sid's doc comment for
+        // the graceful-degradation contract when it's empty).
+        const result = await core.sessionStart({ project, sid: sessionId || undefined });
+        // P1 fence (TOW2-388): the F5 health banner below is a COMPUTED
+        // diagnostic (a failure count from this machine's own hook-health
+        // ledger) — not retrieved/stored natural-language content — and its
+        // own pre-existing contract requires it be the literal FIRST line
+        // of stdout (continuity-wave.test.mjs). It is built into a separate
+        // `preamble` array kept OUTSIDE the memory fence below, in front of
+        // it, so both invariants hold: health-first, AND everything that
+        // IS retrieved memory (`lines`, from here down) is fenced.
+        const preamble: string[] = [];
+        const lines: string[] = [];
+
+        // ---- F5 fail-loud hook health (continuity wave 2026-07-31) ----
+        // FIRST line, above everything else: a hook that has been silently
+        // failing leaves zero trace otherwise (design doc fact 7) — surface
+        // it before the agent reads anything else so memory-not-persisted
+        // isn't discovered days later. Silent (no line at all) when healthy.
+        try {
+          const health = core.readHookHealth();
+          if (health.failures_24h > 0) {
+            preamble.push(`⚠️ AgentRecall: ${health.failures_24h} hook failure${health.failures_24h === 1 ? "" : "s"} (24h) — memory may not be persisted → run 'ar health'`);
+          }
+        } catch { /* non-blocking — health line is best-effort */ }
+
+        lines.push("[AgentRecall] Session context loaded");
+
+        // ---- F2 continuity card (continuity wave 2026-07-31) ----
+        // Top-3 most-recent sessions ACROSS projects, ranked by pure recency
+        // (readRecentSessions already returns newest-first). L1 fix (review,
+        // 2026-07-31): rendered BEFORE the per-project header line, aligning
+        // with the MCP terse formatter (packages/mcp-server/src/tools/
+        // session-start.ts's formatTerse) — that renderer deliberately places
+        // continuity ahead of the header so "what was I doing, anywhere, most
+        // recently" is the first substantive thing read; the CLI previously
+        // rendered it AFTER the header, an unintentional divergence between
+        // the two renderers of the SAME field. Absent entirely when the
+        // recency index has nothing yet (no noise on a fresh/solo-project store).
+        if (result.continuity && result.continuity.length > 0) {
+          // Fable option 2 (label-not-scope, 2026-08-30) — header frames the
+          // WHOLE block as orientation when every entry is cross-project;
+          // otherwise the original neutral header. Single derivation point:
+          // agent-recall-core's continuityHeaderText (matches the MCP
+          // formatTerse renderer of this SAME field byte-for-byte).
+          lines.push(core.continuityHeaderText(result.continuity_all_cross_project));
+          for (const c of result.continuity.slice(0, 3)) {
+            const next = c.next_step ? ` → next: ${truncWordBoundary(c.next_step, 80)}` : "";
+            // Identity-trust (2026-08-20): visibly label a rescue-sourced
+            // (unverified cwd-guess) entry rather than presenting it as
+            // verified memory — see SessionStartResult["continuity"]'s
+            // `untrusted` field doc comment.
+            const trustFlag = c.untrusted ? " [unverified — rescued from a crashed session]" : "";
+            // Fable option 2 (label-not-scope, 2026-08-30) — "↪ " marks an
+            // entry that is NOT this project's own continuity (orientation,
+            // recent work elsewhere); empty for a current-project entry.
+            // Same shared helper the MCP formatTerse renderer calls.
+            const marker = core.continuityEntryMarker(c, result.project);
+            lines.push(`   - ${marker}${c.ago} [${c.slug}] ${truncWordBoundary(c.title, 100)}${next}${trustFlag}`);
+          }
+        }
 
         // Project + identity — always show so agent knows the project
         lines.push(`Project: ${result.project}${result.identity && result.identity !== result.project ? ` — ${result.identity.slice(0, 100)}` : ""}`);
@@ -529,8 +1147,10 @@ async function main(): Promise<void> {
 
         // Semantic prefetch from last session
         try {
+          // Root-fix (2026-08-12, followups wave): same bypass class as
+          // logSyncError — this is AR's own project data, must honor getRoot().
           const prefetchFile = path.join(
-            os.homedir(), ".agent-recall", "projects", project ?? "auto", "semantic-prefetch.json"
+            core.getRoot(), "projects", project ?? "auto", "semantic-prefetch.json"
           );
           if (fs.existsSync(prefetchFile)) {
             const prefetchData = JSON.parse(fs.readFileSync(prefetchFile, "utf-8")) as {
@@ -548,22 +1168,101 @@ async function main(): Promise<void> {
           }
         } catch { /* non-blocking */ }
 
-        process.stdout.write(lines.join("\n") + "\n\n");
+        // P1 fence (TOW2-388): everything in `lines` is retrieved/stored
+        // memory (corrections, insights, journal excerpts, room topics,
+        // cross-project titles) rendered directly into the next agent's
+        // context at session start — the exact surface the 2026-08-18
+        // red-team report exploited (CRITICAL-1: "prints ... directly into
+        // the next agent's context, unprompted"). Fence it as one block;
+        // `preamble` (the F5 health banner) stays outside and first.
+        const rendered = [...preamble, core.fenceMemory(lines.join("\n"))].join("\n");
+        process.stdout.write(rendered + "\n\n");
       } catch (e) {
         // Never block the session — fail silently
+        core.recordHookFailure("hook-start", e);
         process.stderr.write(`[AgentRecall hook-start] ${String(e)}\n`);
       }
+
+      // ---- Working-memory orphan rescue (v3.4.42 working-memory wave) ----
+      // AFTER the render above, best-effort: a session that crashed/was
+      // `kill -9`'d with no hook-end ever firing leaves a WM file behind
+      // forever otherwise. Run on EVERY hook-start (not just this session's
+      // own) so a crashed OTHER window's data gets rescued into a searchable
+      // card the next time ANY session starts.
+      //
+      // Train C (C-2, 2026-08-12 wave): the sweep itself now lives in core
+      // (`rescueOrphanedWorkingMemory`, storage/working-memory.ts) so BOTH
+      // this CLI hook AND core's own `sessionStart()` (called by the MCP
+      // `session_start` tool, reached by hook-less hosts too) invoke the
+      // SAME implementation — single source, no duplicate sweep logic.
+      // Defensive try/catch kept here even though the callee's own contract
+      // is never-throw, matching this file's established convention for
+      // best-effort core calls (see the hook-ambient `wmAppend` call site).
+      try {
+        core.rescueOrphanedWorkingMemory();
+      } catch (e) {
+        core.recordHookFailure("wm-orphan-rescue", e);
+        process.stderr.write(`[AgentRecall hook-start wm-rescue] ${String(e)}\n`);
+      }
+
       break;
     }
 
     case "hook-end": {
       // Fires at session Stop via Stop hook.
-      // Auto-saves a minimal journal entry IF /arsave wasn't called manually.
-      // Per-session lock (mirrors hook-start) prevents double-fire within the same session.
-      const endSessionId = process.env.CLAUDE_SESSION_ID ?? process.env.SESSION_ID ?? "";
+      //
+      // Wave 2 (two-tier memory): FIRST do a mechanical, lossless, judgment-free
+      // verbatim archive of the session — UNCONDITIONALLY, before any capture/
+      // summary short-circuit, so a session can never be "lost" just because
+      // nothing was captured. THEN run the existing capture→summary path, but
+      // defer palace consolidation to the async dreaming queue.
+      //
+      // Per-session lock (mirrors hook-start) prevents double-fire within the
+      // same session. Every failure path exits 0 — never crash into the Stop turn.
+
+      // ---- read stdin first (mirror hook-correction / hook-ambient / hook-pretool)
+      let stopRaw = "";
+      try {
+        const chunks: Buffer[] = [];
+        for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+        stopRaw = Buffer.concat(chunks).toString("utf-8").trim();
+      } catch { stopRaw = ""; }
+
+      let stop: Record<string, unknown> = {};
+      if (stopRaw) {
+        try { stop = JSON.parse(stopRaw) as Record<string, unknown>; }
+        catch { stop = {}; }
+      }
+
+      const transcriptPath =
+        typeof stop.transcript_path === "string" ? stop.transcript_path : undefined;
+      const stopSessionId =
+        typeof stop.session_id === "string" ? stop.session_id : undefined;
+
       const endToday = new Date().toISOString().slice(0, 10);
-      const endLockKey = `${endSessionId || endToday}-end`;
-      const endLockFile = path.join(os.homedir(), ".agent-recall", ".hook-end-lock");
+      // Dedup key = transcript filename UUID (collision-free), else stdin
+      // session_id, else env, else date (last resort — may collide same-day).
+      const sid =
+        (transcriptPath ? path.basename(transcriptPath, ".jsonl") : "") ||
+        stopSessionId ||
+        process.env.CLAUDE_SESSION_ID ||
+        process.env.SESSION_ID ||
+        endToday;
+
+      const endLockKey = `${sid}-end`;
+      // Root-fix (2026-08-12, followups wave): flagged by review as the same
+      // bypass class as logSyncError (2026-07-31) — see hook-start's lockDir
+      // above for the full rationale.
+      const endLockFile = path.join(core.getRoot(), ".hook-end-lock");
+
+      // Continuity wave (2026-07-31) — F1 unified naming: ONE resolution shared
+      // by BOTH the raw-archive path (below) and the journal-summary path
+      // further down. Set inside the archive try-block once resolveSessionProject
+      // runs; the journal-summary path falls back to `project ?? "auto"` when
+      // this is still undefined (e.g. the archive block bailed out early —
+      // ambiguous multi-session skip, unreadable transcript, etc.) so that
+      // path never silently uses a DIFFERENT guess than the archive did.
+      let unifiedProjectSlug: string | undefined;
 
       try {
         if (fs.existsSync(endLockFile) && fs.readFileSync(endLockFile, "utf-8").trim() === endLockKey) {
@@ -572,80 +1271,290 @@ async function main(): Promise<void> {
         fs.writeFileSync(endLockFile, endLockKey, "utf-8");
       } catch { /* non-blocking */ }
 
+      // ---- MECHANICAL ARCHIVE — unconditional, zero dependence on captures ----
+      try {
+        const { readTranscriptByPath, readTodaySessions, resolveSessionProject } = await import("./utils/transcript-reader.js");
+        // Resolve the transcript for THIS session. Prefer the explicit path.
+        // Without it, identify the session by id — NEVER blindly take the newest:
+        // with multiple windows open that would archive another session's bytes
+        // under this key and corrupt the archive. Only use "newest" when it is
+        // unambiguous (exactly one session today); otherwise skip + log.
+        let resolvedPath: string | undefined = transcriptPath;
+        let skippedAmbiguous = false;
+        if (!resolvedPath) {
+          const today = readTodaySessions();
+          const wantId =
+            stopSessionId || process.env.CLAUDE_SESSION_ID || process.env.SESSION_ID || "";
+          const byId = wantId ? today.find((s) => s.sessionId === wantId) : undefined;
+          if (byId) {
+            resolvedPath = byId.file;
+          } else if (today.length === 1) {
+            resolvedPath = today[0].file; // unambiguous
+          } else if (today.length > 1) {
+            process.stderr.write(
+              `[AgentRecall hook-end] no transcript_path and ${today.length} sessions today with no id match — skipping archive to avoid archiving the wrong session\n`,
+            );
+            skippedAmbiguous = true;
+          }
+        }
+
+        // ---- P3: agent-intent backstop scan ----
+        // Best-effort, bounded, try/catch — MUST NOT throw into the Stop hook.
+        // If the agent's last few assistant messages express a durable save intent
+        // (saveTriggerKind === 'explicit-save'), force the archive even when the
+        // normal resolution would skip (ambiguous multi-session, no explicit path).
+        // Uses the stdin transcript_path as a last-resort fallback in the skip case.
+        try {
+          const scanPath = resolvedPath ?? (skippedAmbiguous ? transcriptPath : undefined);
+          if (scanPath) {
+            const { saveTriggerKind } = await import("agent-recall-core");
+            const scanSrc = readTranscriptByPath(scanPath);
+            if (scanSrc && typeof scanSrc.rawTail === "string") {
+              // Extract the last 3 assistant messages from the tail (bounded).
+              const SCAN_LIMIT = 3;
+              const tailLines: unknown[] = [];
+              for (const line of scanSrc.rawTail.split("\n").filter(Boolean)) {
+                try { tailLines.push(JSON.parse(line)); } catch { /* skip malformed */ }
+              }
+              const assistantTexts: string[] = [];
+              for (let i = tailLines.length - 1; i >= 0 && assistantTexts.length < SCAN_LIMIT; i--) {
+                const rec = tailLines[i] as Record<string, unknown> | null;
+                if (!rec || rec.type !== "assistant") continue;
+                const msg = rec.message as Record<string, unknown> | undefined;
+                const content = msg?.content;
+                if (!Array.isArray(content)) continue;
+                const prose = content
+                  .filter((c) => (c as Record<string, unknown>).type === "text")
+                  .map((c) => String((c as Record<string, unknown>).text ?? ""))
+                  .join(" ")
+                  .trim();
+                if (prose) assistantTexts.push(prose);
+              }
+              const agentIntentDetected = assistantTexts.some(
+                (t) => saveTriggerKind(t) === "explicit-save",
+              );
+              if (agentIntentDetected) {
+                process.stderr.write("[AgentRecall hook-end] agent save-intent detected — ensuring archive fires\n");
+                // Force the resolved path when we were in the skip-due-to-ambiguity case.
+                if (!resolvedPath && scanPath) {
+                  resolvedPath = scanPath;
+                }
+              }
+            }
+          }
+        } catch { /* intent scan is best-effort — never surface into Stop turn */ }
+
+        // Read the actual transcript file (gives a verbatim rawTail). Key the
+        // archive on the file's own UUID so content and key always agree.
+        const src = resolvedPath ? readTranscriptByPath(resolvedPath) : null;
+        if (src && resolvedPath && typeof src.rawTail === "string") {
+          // resolvedPath is narrowed to string here; its basename IS the session UUID.
+          const archiveSid = path.basename(resolvedPath, ".jsonl");
+
+          // ---- Continuity wave (2026-07-31): ONE unified project resolution ----
+          // F1's resolveSessionProject() replaces the old split-brain guess
+          // (raw-archive path used src.projectGuess; the journal-summary path
+          // below used to re-derive its own value from `project ?? "auto"`
+          // independently — the exact split-brain bug this wave fixes). Computed
+          // ONCE here and reused by archiveSession, enqueueConsolidation, the
+          // session card, the recency-index append, AND the journal-summary
+          // path further down (`resolvedProj`) — a single source of truth for
+          // "what project does this session belong to". An explicit `--project`
+          // override always wins over the guess (never overridden by it).
+          const resolved = resolveSessionProject(src.headText ?? "", src.tailText ?? "");
+          const proj = project ?? resolved.slug;
+          // Confidence is only meaningful for a GUESS — an explicit --project
+          // override is maximal certainty (human-specified), not a guess.
+          const projConfidence = project ? 1 : resolved.confidence;
+          // Shared with the journal-summary path below — the single-namer fix.
+          unifiedProjectSlug = proj;
+
+          core.archiveSession({
+            project: proj,
+            sessionId: archiveSid,
+            transcriptPath: resolvedPath,
+            rawTranscript: src.rawTail,
+            summary: src.firstUserMessage ?? undefined,
+          });
+          core.enqueueConsolidation({ project: proj, sessionId: archiveSid, reason: "hook-end archive" });
+
+          // ---- F3 unconditional session card + F2 recency append ----
+          // The raw archive above has ALREADY succeeded by this point — it is
+          // the last-resort, must-never-be-lost layer. Everything below is an
+          // additive, best-effort distillation on top of it: any failure here
+          // must never look like the archive itself failed, and must never
+          // throw into the outer catch/Stop turn (own try/catch + fail-loud
+          // recording via recordHookFailure, F5).
+          try {
+            const card = core.buildSessionCard({
+              rawHead: src.headText ?? "",
+              // Use the F1b-fixed, tail-biased dump (not the narrower default
+              // tail sample) — this is exactly the sample engineered to
+              // preserve the session's true ending, where decisions/next-steps
+              // live, so the card's "last exchange"/decisions/nextStep
+              // extraction gets the highest-fidelity tail available.
+              rawTail: src.rawTail,
+              meta: {
+                sid: archiveSid,
+                slug: proj,
+                slugConfidence: projConfidence,
+                slugCandidates: resolved.candidates,
+                date: endToday,
+              },
+            });
+            core.writeSessionCard(card);
+            core.appendRecentSession({
+              ts: new Date().toISOString(),
+              sid: archiveSid,
+              slug: proj,
+              slug_confidence: projConfidence,
+              title: card.title,
+              next_step: card.nextStep[0],
+              artifact_count: card.artifacts.length,
+            });
+            // v3.4.42 working-memory wave — "sleep consolidation": the session
+            // reached a normal, successful hook-end (card + recency both
+            // written above), so its minutes-level working-memory file is no
+            // longer needed — natural forgetting by design, not an archive.
+            // Deliberately INSIDE this try block: if the card/recency write
+            // above threw, we must NOT delete the only remaining record of
+            // this session — leaving WM intact lets orphan rescue recover it
+            // later instead.
+            core.wmDelete(archiveSid);
+          } catch (e) {
+            core.recordHookFailure("hook-end-card", e);
+            process.stderr.write(`[AgentRecall hook-end card] ${String(e)}\n`);
+          }
+        }
+      } catch (e) {
+        // Archive must never break the Stop turn.
+        core.recordHookFailure("hook-end-archive", e);
+        process.stderr.write(`[AgentRecall hook-end archive] ${String(e)}\n`);
+      }
+
+      // ---- existing capture→summary path (now deferred + stub dropped) ----
       try {
         const today = endToday;
 
-        // Only save if there's actual capture data from this session.
-        // If nothing was captured, don't create a useless stub file.
-        const resolvedJournalDir = path.join(os.homedir(), ".agent-recall", "projects", project ?? "auto", "journal");
+        // Only write a journal summary if there's actual capture data from this
+        // session. The 60-char "Auto-saved:" stub is DROPPED (Wave 2) — the
+        // verbatim archive above is the floor; the summary is additive.
+        //
+        // Continuity wave (2026-07-31) — F1 unified naming: this used to
+        // independently fall back to bare `project ?? "auto"`, ignoring
+        // whatever the raw-archive path above resolved via
+        // resolveSessionProject() — the exact split-brain bug where one
+        // session's data landed in two different project directories.
+        // `unifiedProjectSlug` (set above, if the archive block ran and
+        // resolved a slug) is now the SAME resolution the archive used;
+        // `project ?? "auto"` remains the fallback only when the archive
+        // block never ran/resolved (e.g. ambiguous-session skip).
+        // Root-fix (2026-08-12, followups wave): was a hand-rolled os.homedir()
+        // join — bypassed BOTH getRoot() (AGENT_RECALL_ROOT/--root) AND the
+        // case-fold-safe EXISTING-DIR resolution that core.journalDir() applies
+        // (resolveProjectDirName + assertInsideRoot). Using the canonical
+        // helper fixes both at once.
+        const resolvedJournalDir = core.journalDir(project ?? unifiedProjectSlug ?? "auto");
         const logFile = path.join(resolvedJournalDir, `${today}-log.md`);
 
-        // Check for captures
         let summary = "";
         if (fs.existsSync(logFile)) {
           const logContent = fs.readFileSync(logFile, "utf-8");
           const answers = logContent.match(/\*\*A:\*\*\s*(.+)/g) ?? [];
           if (answers.length > 0) {
-            summary = `Auto-saved: ${answers.slice(0, 2).map((a) => a.replace("**A:** ", "").slice(0, 60)).join("; ")}`;
+            summary = answers
+              .slice(0, 2)
+              .map((a) => a.replace("**A:** ", "").slice(0, 60))
+              .join("; ");
           }
         }
 
-        // Also check if any smart-named journal was already written today (by /arsave)
+        // Also check if any smart-named journal was already written today (by /arsave).
         const existingToday = fs.existsSync(resolvedJournalDir)
           ? fs.readdirSync(resolvedJournalDir).some(f => f.startsWith(today) && f.endsWith(".md") && f !== "index.md")
           : false;
 
+        // Guards now run AFTER the archive block: the lossless dump already
+        // happened, so skipping the summary here loses nothing.
         if (!summary && existingToday) {
-          // /arsave already ran today — no stub needed
-          process.exit(0);
+          process.exit(0); // /arsave already ran today — no summary needed
         }
-
         if (!summary) {
-          // No captures, no existing journal — nothing worth saving. Skip silently.
-          process.exit(0);
+          process.exit(0); // no captures, no journal — verbatim archive is enough
         }
 
-        await core.sessionEnd({ summary, project, saveType: "hook-end" });
+        // Defer palace consolidation to the async queue (Decision #3).
+        await core.sessionEnd({ summary, project, saveType: "hook-end", deferConsolidation: true });
         process.stderr.write(`[AgentRecall] Session auto-saved\n`);
 
-        // Write summary for arstatus cache script (async, non-blocking)
-        try {
-          const summaryFile = path.join(os.homedir(), ".agent-recall", ".last-session-summary.txt");
-          fs.writeFileSync(summaryFile, summary, "utf-8");
-          // Spawn cache generation in background — never await
-          const { spawn } = await import("node:child_process");
-          spawn("python3", [
-            path.join(os.homedir(), ".claude", "scripts", "ar-arstatus-cache.py"),
-          ], { detached: true, stdio: "ignore" }).unref();
-        } catch { /* non-blocking */ }
+        // ---- everything below DEPENDS on `summary` — guard it. ----
+        if (summary) {
+          // Write summary for arstatus cache script (async, non-blocking)
+          try {
+            // Root-fix (2026-08-12, followups wave): same bypass class as logSyncError.
+            const summaryFile = path.join(core.getRoot(), ".last-session-summary.txt");
+            fs.writeFileSync(summaryFile, summary, "utf-8");
+            // Spawn cache generation in background — never await
+            const { spawn } = await import("node:child_process");
+            spawn("python3", [
+              path.join(os.homedir(), ".claude", "scripts", "ar-arstatus-cache.py"),
+            ], { detached: true, stdio: "ignore" }).unref();
+          } catch { /* non-blocking */ }
 
-        // Semantic prefetch — pre-warm next session's context
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const coremod = await import("agent-recall-core") as any;
-          const backend = await coremod.getRecallBackend();
-          const prefetchProject = project ?? "auto";
-          if (backend.available() && summary) {
-            const prefetchResults = await backend.search(summary.slice(0, 200), prefetchProject, 5);
-            if (prefetchResults.length > 0) {
-              const prefetchFile = path.join(
-                os.homedir(), ".agent-recall", "projects", prefetchProject, "semantic-prefetch.json"
-              );
-              fs.writeFileSync(prefetchFile, JSON.stringify({
-                generated: new Date().toISOString(),
-                query: summary.slice(0, 100),
-                results: prefetchResults.map((r: { title: string; excerpt?: string; score: number; source: string }) => ({
-                  title: r.title,
-                  excerpt: r.excerpt?.slice(0, 200) ?? "",
-                  score: r.score,
-                  source: r.source,
-                }))
-              }, null, 2), "utf-8");
+          // Semantic prefetch — pre-warm next session's context
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const coremod = await import("agent-recall-core") as any;
+            const backend = await coremod.getRecallBackend();
+            const prefetchProject = project ?? "auto";
+            if (backend.available()) {
+              const prefetchResults = await backend.search(summary.slice(0, 200), prefetchProject, 5);
+              if (prefetchResults.length > 0) {
+                // Root-fix (2026-08-12, followups wave): same bypass class as
+                // logSyncError — mirrors hook-start's read of this same file
+                // above (both now resolve via getRoot()).
+                const prefetchFile = path.join(
+                  core.getRoot(), "projects", prefetchProject, "semantic-prefetch.json"
+                );
+                fs.writeFileSync(prefetchFile, JSON.stringify({
+                  generated: new Date().toISOString(),
+                  query: summary.slice(0, 100),
+                  results: prefetchResults.map((r: { title: string; excerpt?: string; score: number; source: string }) => ({
+                    title: r.title,
+                    excerpt: r.excerpt?.slice(0, 200) ?? "",
+                    score: r.score,
+                    source: r.source,
+                  }))
+                }, null, 2), "utf-8");
+              }
             }
-          }
-        } catch { /* non-blocking — prefetch is best-effort */ }
+          } catch { /* non-blocking — prefetch is best-effort */ }
+        }
       } catch (e) {
+        core.recordHookFailure("hook-end-summary", e);
         process.stderr.write(`[AgentRecall hook-end] ${String(e)}\n`);
+      }
+      break;
+    }
+
+    case "consolidate-async": {
+      // Wave 2: drain the async consolidation queue. Each pending job runs the
+      // pure-regex consolidateJournalToPalace (headless-safe, no LLM). One bad
+      // job never blocks the rest. Invocable only — NO cron/scheduler created.
+      try {
+        const report = core.drainConsolidationQueue((job) => {
+          try {
+            core.ensurePalaceInitialized(job.project);
+            core.consolidateJournalToPalace(job.project);
+          } catch (e) {
+            // rethrow so the queue marks this job failed (not done) for retry
+            throw e instanceof Error ? e : new Error(String(e));
+          }
+        });
+        output(`consolidate-async: ${report.processed} processed, ${report.failed} failed`);
+      } catch (e) {
+        core.recordHookFailure("consolidate-async", e);
+        process.stderr.write(`[AgentRecall consolidate-async] ${String(e)}\n`);
       }
       break;
     }
@@ -655,7 +1564,8 @@ async function main(): Promise<void> {
       // Detects correction language (English + Chinese) and silently captures to alignment-log.
       // Per-message hash dedup prevents duplicate entries from hook re-fires.
       // Always exits 0 — never blocks the conversation.
-      const corrLockFile = path.join(os.homedir(), ".agent-recall", ".hook-correction-seen");
+      // Root-fix (2026-08-12, followups wave): same bypass class as logSyncError.
+      const corrLockFile = path.join(core.getRoot(), ".hook-correction-seen");
 
       // Read existing seen entries (array of {hash, keywords} for semantic dedup)
       let seenEntries: Array<{ hash: string; keywords: string[] }> = [];
@@ -682,31 +1592,7 @@ async function main(): Promise<void> {
         return Math.abs(h).toString(36).slice(0, 8);
       }
 
-      const CORRECTION_PATTERNS = [
-        // English patterns
-        /\bthat'?s\s+wrong\b/i,
-        /\byou\s+(missed|didn'?t|forgot|skipped)\b/i,
-        /\bnot\s+what\s+i\s+(asked|wanted|meant|said)\b/i,
-        /\bagain\s+you\b/i,
-        /\bstop\s+(doing|adding|making)\b/i,
-        /\bwrong\s+(approach|direction|file|function)\b/i,
-        /\bi\s+said\b.*\bnot\b/i,
-        /\bdon'?t\s+(do\s+that|change|delete|add)\b/i,
-        /\bno[,!.]\s+(don'?t|that|you|i\s+meant)\b/i,
-        // Chinese patterns
-        /不对/,
-        /错了/,
-        /不要这样/,
-        /不是这个/,
-        /你搞错了/,
-        /我说的不是/,
-        /别这样做/,
-        /重新来/,
-        /你忘了/,
-        /不是我要的/,
-        /搞反了/,
-        /方向不对/,
-      ];
+      // Detection logic lives in ./utils/correction-detector.ts (detectCorrection)
 
       try {
         const chunks: Buffer[] = [];
@@ -730,31 +1616,15 @@ async function main(): Promise<void> {
           prompt = raw; // fallback: treat raw input as the prompt
         }
 
-        // Behavioral correction signals — frequency/repetition language that implies a pattern,
-        // not a one-time task redirect. Only behavioral corrections are stored as rules.
-        // Task corrections ("no, use the blue button") are ephemeral and should NOT persist
-        // across sessions as P0 mandates.
-        const BEHAVIORAL_SIGNALS = [
-          /\bagain\b/i,             // "you did it again"
-          /\bkeep\s+\w+ing\b/i,    // "you keep doing..."
-          /\balways\b/i,            // "you always add..."
-          /\bevery\s+time\b/i,      // "every time you..."
-          /\byou\s+still\b/i,       // "you still..."
-          /\bhow\s+many\s+times\b/i,
-          /\bi\s+told\s+you\b/i,    // "I told you already"
-          /\bnever\s+do\b/i,         // "never do this" = rule
-          /\bdon'?t\s+ever\b/i,
-          /\btend\s+to\b/i,          // "you tend to..."
-          /\bthis\s+is\s+a\s+(?:rule|pattern)\b/i,
-          /\bremember\s+(?:this\s+rule|for\s+next\s+time)\b/i,
-          // Chinese frequency/behavioral signals
-          /你总是/, /每次/, /又来了/, /反复/, /多少次/, /你老是/, /一直都/, /还是在做/,
-        ];
-        const isBehavioral = BEHAVIORAL_SIGNALS.some((p) => p.test(prompt));
+        // Non-semantic harness artifact early-exit (FIX 1): task-notifications and
+        // agent-message wrappers must never be scanned for corrections.
+        // Shared HARNESS_PREFIXES regex is defined in hook-ambient above.
+        if (/^(<task-notification>|<agent-message|<local-command-caveat>|<command-name>|<system-reminder>)/i.test(prompt.trimStart())) process.exit(0);
 
-        const isCorrection = CORRECTION_PATTERNS.some((p) => p.test(prompt));
-        // Only store if it's a correction AND has behavioral signals (repeating pattern, not task redirect)
-        if (isCorrection && isBehavioral && prompt.length > 3) {
+        // Two-gate capture: correction signal + durability signal (and the >3
+        // char floor) are all enforced inside detectCorrection().
+        const detection = detectCorrection(prompt);
+        if (detection.captured) {
           // Per-message dedup: skip if exact same prompt was already processed
           const promptHash = quickHash(prompt);
           if (seenEntries.some(e => e.hash === promptHash)) {
@@ -825,8 +1695,23 @@ async function main(): Promise<void> {
 
       const SHORT_ACKS = /^(ok|yes|done|sure|got it|thanks|k|yep|nope|no|maybe|yup|alright|cool|great|perfect|sounds good|noted|understood|agreed|fine|right)\.?$/i;
 
+      /**
+       * Returns true for harness-generated prompts that carry no human semantic
+       * content. Must exit early — before ANY recall/injection work — so that
+       * task-notifications and agent-message wrappers are never scanned for
+       * corrections, memories, or save-intent. Trim leading whitespace first.
+       */
+      const HARNESS_PREFIXES = /^(<task-notification>|<agent-message|<local-command-caveat>|<command-name>|<system-reminder>)/i;
+      function isHarnessArtifact(text: string): boolean {
+        return HARNESS_PREFIXES.test(text.trimStart());
+      }
+
       // Communication file for feedback loop (defined at top of case for both steps)
-      const surfacedFile = path.join(os.homedir(), ".agent-recall", ".ambient-last-surfaced.json");
+      // Root-fix (2026-08-12, followups wave): same bypass class as logSyncError.
+      // Note this case block ALREADY uses core.getRoot() for storeRoot (topic
+      // profile, below) — this file was the odd one out, inconsistent within
+      // its own function.
+      const surfacedFile = path.join(core.getRoot(), ".ambient-last-surfaced.json");
 
       try {
         const chunks: Buffer[] = [];
@@ -836,12 +1721,76 @@ async function main(): Promise<void> {
 
         let prompt = "";
         let sessionId = process.env.CLAUDE_SESSION_ID ?? process.env.SESSION_ID ?? "default";
+        // H2 fix (review, post-build): `sessionId` above falls back to the
+        // LITERAL string "default" when no env var is set — that sentinel is
+        // used elsewhere in this case (topic-profile key, rate-limit counter
+        // file) and is safe there because those call sites already special-
+        // case it. It is NOT safe for working-memory: `wmAppend("default", …)`
+        // would write into a SHARED `default.jsonl` fed by every caller on this
+        // machine that lacks a resolvable session id, defeating the per-sid
+        // isolation the whole module is built on (design doc §Mechanism: "Per-
+        // sid file ⇒ NO shared-file write race between windows"). Worse, hook-
+        // end's own sid resolution (below, in the `hook-end` case) can NEVER
+        // produce that same "default" literal — its unresolvable-fallback is a
+        // date string — so a `default.jsonl` written here is a file hook-end's
+        // normal cleanup path structurally can never reach; it only gets swept
+        // up later by orphan-rescue as ONE mixed-session card blending prompts
+        // from every unresolvable caller. `hasRealSessionId` tracks whether a
+        // GENUINE id was ever seen (stdin `session_id`, or an env var) — WM
+        // capture is gated on it below; every OTHER use of `sessionId` in this
+        // case is untouched (same "default" fallback, same downstream
+        // behavior) since this fix is scoped to the WM tier only. Guards
+        // against BOTH "the env var is unset" (sessionId === "default", the
+        // `??` chain's own fallback) AND "the env var is explicitly set to an
+        // empty string" (`??` does not substitute for "" — only null/
+        // undefined — so an empty CLAUDE_SESSION_ID would otherwise slip
+        // through as sessionId="" and be treated as "real").
+        let hasRealSessionId = sessionId !== "default" && sessionId.length > 0;
+        // v3.4.42 working-memory wave: cwd for the WM line below. Claude Code's
+        // hook JSON is documented to carry a `cwd` field, but no existing hook
+        // in this file reads it (verified — grep found zero prior `.cwd`
+        // access) — defend against it being absent by falling back to this
+        // process's own cwd, which for a hook spawned by Claude Code is the
+        // session's working directory anyway.
+        let cwd = process.cwd();
         try {
           const parsed = JSON.parse(raw);
           prompt = parsed.prompt ?? parsed.message ?? parsed.user_message ?? "";
-          if (parsed.session_id) sessionId = String(parsed.session_id);
+          if (parsed.session_id) {
+            sessionId = String(parsed.session_id);
+            hasRealSessionId = true;
+          }
+          if (typeof parsed.cwd === "string" && parsed.cwd) cwd = parsed.cwd;
         } catch {
           prompt = raw;
+        }
+
+        // Non-semantic harness artifact early-exit (FIX 1): task-notifications,
+        // agent-message wrappers, system-reminders, etc. carry no human intent.
+        // Exit before ANY recall/injection work — no output, no store writes.
+        if (isHarnessArtifact(prompt)) process.exit(0);
+
+        // ---- Working-memory capture (v3.4.42 working-memory wave) ----
+        // AFTER stdin parse and the harness-artifact exit above (so a
+        // task-notification/agent-message wrapper never lands in working
+        // memory), BEFORE any other early-exit (short prompt, slash command,
+        // short ack) below — minutes-level capture should see genuine short
+        // prompts and acks too, not just the ones that go on to trigger a
+        // recall. Best-effort: must never delay/deny the ambient injection
+        // output that follows. wmAppend's own contract already never throws
+        // (self-contained try/catch + recordHookFailure) — this wrapper is
+        // defensive insurance only, matching this file's existing style.
+        //
+        // H2 fix: when no session id is resolvable at all (no stdin
+        // `session_id`, no `CLAUDE_SESSION_ID`/`SESSION_ID` env var), SKIP the
+        // WM append entirely — graceful degrade to pre-WM behavior — instead
+        // of writing into the shared "default" bucket described above. The
+        // rest of hook-ambient (recall/injection) is completely unaffected;
+        // this only gates the one line below.
+        if (hasRealSessionId) {
+          try {
+            core.wmAppend(sessionId, { ts: new Date().toISOString(), prompt, cwd });
+          } catch { /* defensive — wmAppend's own contract already never throws */ }
         }
 
         // --- READ PREVIOUS SURFACED DATA (used by feedback + topic drift + dedup) ---
@@ -859,21 +1808,10 @@ async function main(): Promise<void> {
 
             // Only process feedback if surfaced items are recent (< 10 min)
             if (age < 600_000 && Array.isArray(prevSurfaced.items) && prevSurfaced.items.length > 0) {
-              // Reuse the same CORRECTION_PATTERNS from hook-correction
-              const CORRECTION_PATTERNS = [
-                // English
-                /\bthat'?s\s+wrong\b/i, /\byou\s+(missed|didn'?t|forgot|skipped)\b/i,
-                /\bnot\s+what\s+i\s+(asked|wanted|meant|said)\b/i, /\bagain\s+you\b/i,
-                /\bstop\s+(doing|adding|making)\b/i, /\bwrong\s+(approach|direction|file|function)\b/i,
-                /\bi\s+said\b.*\bnot\b/i, /\bdon'?t\s+(do\s+that|change|delete|add)\b/i,
-                /\bno[,!.]\s+(don'?t|that|you|i\s+meant)\b/i,
-                // Chinese
-                /不对/, /错了/, /不要这样/, /不是这个/, /你搞错了/,
-                /我说的不是/, /别这样做/, /重新来/, /你忘了/, /不是我要的/,
-                /搞反了/, /方向不对/,
-              ];
-
-              const isCorrection = CORRECTION_PATTERNS.some(p => p.test(prompt));
+              // Deliberately correction-gate ONLY (asymmetric vs hook-correction, by
+              // design): any pushback right after a recall marks the surfaced items
+              // not-useful — the durability (behavioral) gate is irrelevant for feedback.
+              const isCorrection = detectCorrection(prompt).correctionHit !== null;
 
               // Build feedback array
               const feedback = prevSurfaced.items!.map((item: { id: string; title: string }) => ({
@@ -924,8 +1862,58 @@ async function main(): Promise<void> {
         if (prompt.startsWith("/")) process.exit(0);
         if (SHORT_ACKS.test(prompt.trim())) process.exit(0);
 
+        // --- ROLLING TOPIC PROFILE (background-informed recall) ---
+        // Runs for every genuine prompt that reaches this point — deliberately
+        // BEFORE the rate-limit gate below, so a run of background turns that
+        // never individually fire injection (rate-limited) still deposits
+        // keywords into the profile. That's the whole point: 3 turns of
+        // "we're migrating the billing service... Postgres schema is the
+        // tricky part..." should inform recall on turn 4's generic "what
+        // should I watch out for?" even though turns 1-3 may not themselves
+        // have fired an injection. See packages/cli/src/utils/topic-state.ts.
+        const storeRoot = core.getRoot();
+        // Reuse the session id already resolved above (parsed.session_id,
+        // then CLAUDE_SESSION_ID/SESSION_ID env vars). Only when NONE of
+        // those produced a real id (sessionId === "default") do we fall back
+        // to a per-day-per-project key here — a bare "default" would merge
+        // every session-less caller's background topic into one file, which
+        // is worse than no profile at all.
+        const topicSessionKey = sessionId !== "default"
+          ? sessionId
+          : `noSessionId-${(project ?? "noProject")}-${new Date().toISOString().slice(0, 10)}`;
+
+        // Current-prompt keywords, English-only (existing extractor — kept
+        // exactly as the hook already used it for the current-prompt
+        // precision floor below). Extended with the CJK-aware tokenizer's
+        // output so Chinese prompts also contribute real keywords instead of
+        // extractKeywords' empty set (it strips all non-ASCII input).
+        const currentKeywords = core.extractKeywords(prompt, 6);
+        const topicKeywords = extractTopicKeywords(prompt);
+        const combinedCurrentKeywords = Array.from(new Set([...currentKeywords, ...topicKeywords]));
+
+        const priorTopicProfileFile = loadTopicProfile(storeRoot, topicSessionKey);
+        const priorProfileMap = computeDecayedProfile(priorTopicProfileFile?.turns ?? []);
+        // Profile terms NOT already covered by this turn's own keywords —
+        // shared by the query builder below AND the precision-tier gate
+        // further down, so both consume the identical term set.
+        const profileTerms = profileOnlyTerms(combinedCurrentKeywords, priorProfileMap);
+        const queryKeywords = topicQuery(combinedCurrentKeywords, priorProfileMap);
+
+        try {
+          // Persist THIS turn's keywords for future turns to accumulate on —
+          // uses the CJK-aware extraction so Chinese background chat also
+          // builds a profile.
+          appendTopicTurn(storeRoot, topicSessionKey, topicKeywords);
+          // Opportunistic hygiene: sweep sibling profile files untouched for
+          // 7+ days. Cheap (readdir + stat over a handful of small files) and
+          // best-effort — never blocks the hook.
+          sweepStaleProfiles(storeRoot);
+        } catch { /* non-blocking — profile persistence is best-effort */ }
+        // --- END ROLLING TOPIC PROFILE ---
+
         // Rate limiting: counter file per session
-        const counterFile = path.join(os.homedir(), ".agent-recall", `.ambient-counter-${sessionId.replace(/[^a-z0-9_-]/gi, "_")}`);
+        // Root-fix (2026-08-12, followups wave): same bypass class as logSyncError.
+        const counterFile = path.join(core.getRoot(), `.ambient-counter-${sessionId.replace(/[^a-z0-9_-]/gi, "_")}`);
         let counter = 0;
         try {
           const raw2 = fs.existsSync(counterFile) ? fs.readFileSync(counterFile, "utf-8").trim() : "0";
@@ -938,11 +1926,31 @@ async function main(): Promise<void> {
         const shouldFire = counter === 1 || counter % 5 === 0 || isHighValue;
         if (!shouldFire) process.exit(0);
 
-        // Extract keywords and do smart recall
-        const keywords = core.extractKeywords(prompt, 6);
-        if (keywords.length === 0) process.exit(0);
+        // --- PRIOR PASS (Wave 4 bridge): push a correction-derived prior EARLY,
+        // ABOVE the recalled fact list. This is the highest-value signal — emit it
+        // even if recall later finds nothing. buildPriors is pure + gated at >=2
+        // token overlap (strict). Best-effort; never blocks. ---
+        try {
+          const priorProject = project ?? "auto";
+          const p0 = core.readP0Corrections(priorProject) ?? [];
+          const blindSpots = core.readAwarenessState()?.blindSpots ?? [];
+          const priors = core.buildPriors(prompt, p0, blindSpots);
+          if (priors.length > 0) {
+            // P1 fence (TOW2-388): priors quote correction/blind-spot text
+            // injected mid-conversation via UserPromptSubmit — fence it.
+            process.stdout.write(core.fenceMemory(priors.slice(0, 2).join("\n")) + "\n");
+          }
+        } catch { /* non-blocking — priors are best-effort */ }
 
-        const recalled = await core.smartRecall({ query: keywords.join(" "), project, limit: 3 });
+        // Build the recall query from current-prompt keywords PLUS the
+        // rolling topic profile computed above (background-informed recall —
+        // see the ROLLING TOPIC PROFILE block above this turn's rate-limit
+        // gate). When the profile is empty (no prior turns / stale / fresh
+        // session), queryKeywords === combinedCurrentKeywords and behavior is
+        // unchanged from before this feature.
+        if (queryKeywords.length === 0) process.exit(0);
+
+        const recalled = await core.smartRecall({ query: queryKeywords.join(" "), project, limit: 3, drilldown: true });
 
         // Ambient precision floor: require ≥2 overlapping content words (≥4 chars,
         // non-stopwords) between the query tokens and the result title+excerpt.
@@ -964,7 +1972,11 @@ async function main(): Promise<void> {
             .split(/\s+/)
             .filter((w) => w.length >= 4 && !AMBIENT_STOPWORDS.has(w));
         }
-        const queryTokenSet = new Set(ambientTokens(keywords.join(" ")));
+        // CURRENT-prompt precision floor — unchanged from before this
+        // feature: built ONLY from this turn's own keywords, never from the
+        // topic profile. This is deliberate (see task spec): the existing
+        // ≥2-overlap floor for current-prompt matches must not regress.
+        const queryTokenSet = new Set(ambientTokens(currentKeywords.join(" ")));
 
         function wordOverlap(item: { title?: string; excerpt?: string }): number {
           if (queryTokenSet.size === 0) return 0;
@@ -977,16 +1989,49 @@ async function main(): Promise<void> {
           return hits;
         }
 
-        // Require ≥2 overlapping content words AND a meaningful score floor.
+        // Topic-profile precision tier — a HIGHER bar than the current-prompt
+        // floor, not a lower one (background-informed recall, not "spray old
+        // topics at every prompt"). Uses core.tokenize (CJK-aware) rather than
+        // the current-prompt-only, Latin-only ambientTokens(), since profile
+        // terms themselves come from the CJK-aware extractor.
+        const profileTokenSet = new Set(profileTerms);
+
+        function profileOverlap(item: { title?: string; excerpt?: string }): number {
+          if (profileTokenSet.size === 0) return 0;
+          const itemText = (item.title ?? "") + " " + (item.excerpt ?? "");
+          const itemTokens = core.tokenize(itemText);
+          let hits = 0;
+          for (const t of itemTokens) {
+            if (profileTokenSet.has(t)) hits++;
+          }
+          return hits;
+        }
+
+        // Inclusion rule (exact, per task spec):
+        //   - currentOverlap >= 2                                  → include (existing floor, unchanged)
+        //   - profileOverlap >= 2 AND currentOverlap >= 1          → include (profile-assisted)
+        //   - profileOverlap >= 3 AND currentOverlap === 0         → include (pure background match, highest bar)
+        //   - otherwise                                            → excluded
         // Silence (empty output) is always preferred over low-relevance noise.
-        const allItems = (recalled.results ?? []).filter(item =>
-          item.score >= 0.03 && wordOverlap(item) >= 2
-        );
+        const allItems = (recalled.results ?? []).filter(item => {
+          if (item.score < 0.03) return false;
+          const curHits = wordOverlap(item);
+          if (curHits >= 2) return true;
+          const profHits = profileOverlap(item);
+          if (profHits >= 2 && curHits >= 1) return true;
+          if (profHits >= 3 && curHits === 0) return true;
+          return false;
+        });
         if (allItems.length === 0) process.exit(0);
 
         // Dedup window: filter out items already surfaced in recent fires
         const historySet = new Set(surfacedHistory);
-        const items = allItems.filter(item => !historySet.has(item.id));
+        // FIX 3: cap at 2 injected items (highest-overlap first) to prevent
+        // multi-item noise dumps. allItems is already sorted by score descending.
+        const MAX_INJECT = 2;
+        const items = allItems
+          .filter(item => !historySet.has(item.id))
+          .slice(0, MAX_INJECT);
         if (items.length === 0) process.exit(0);
 
         let out = "[AgentRecall] Relevant past context:\n";
@@ -1001,7 +2046,21 @@ async function main(): Promise<void> {
           const suffix = excerpt ? ` — ${excerpt}` : "";
           out += `• [${source}][${conf}] ${title}${suffix}\n`;
         }
-        process.stdout.write(out);
+
+        // Bridge (Wave 4): attach verbatim drill-down source for low-confidence hits.
+        if (recalled.bridged && recalled.bridged.length > 0) {
+          out += "  ↳ verbatim source (low-confidence — verify before relying):\n";
+          for (const b of recalled.bridged) {
+            const snippet = b.verbatim.replace(/\n/g, " ").slice(0, 120);
+            out += `    [${b.source}] ${snippet}\n`;
+          }
+        }
+
+        // P1 fence (TOW2-388): `out` is retrieved recall results (titles,
+        // excerpts, verbatim drill-down) injected mid-conversation via
+        // UserPromptSubmit — the same "ambient injection" class the
+        // red-team report used to demonstrate CRITICAL-1. Fence it.
+        process.stdout.write(core.fenceMemory(out) + "\n");
 
         // Save surfaced items for feedback loop + update dedup history
         try {
@@ -1011,7 +2070,7 @@ async function main(): Promise<void> {
 
           const surfacedData = {
             items: items.map(item => ({ id: item.id, title: item.title })),
-            query: keywords.join(" "),
+            query: queryKeywords.join(" "),
             timestamp: new Date().toISOString(),
             history: updatedHistory,
           };
@@ -1089,7 +2148,12 @@ async function main(): Promise<void> {
           });
 
           if (result.warning) {
-            // Compact format: header + top matches, max 6 lines total
+            // Compact format: header + top matches, max 6 lines total.
+            // Wave 5: a `blocked` verdict (authoritative P0 override, not noise)
+            // leads with the CONFLICT banner so the agent sees it first.
+            if (result.verdict === "blocked") {
+              warningLines.push(`[AgentRecall] ⛔ CONFLICT — a human correction OVERRIDES this plan. Reconcile first.`);
+            }
             warningLines.push(`[AgentRecall] ⚠️  Pre-action check: ${commandStr.slice(0, 80)}`);
 
             // Top correction (P0 first)
@@ -1114,7 +2178,17 @@ async function main(): Promise<void> {
 
             // Ensure we never exceed 6 lines
             warningLines = warningLines.slice(0, 6);
-            process.stdout.write(warningLines.join("\n") + "\n");
+            // P1 fence (TOW2-388): quotes correction/rule/insight text
+            // (result.matching_corrections[].rule, matching_rules[].do,
+            // matching_insights[].title) injected mid-conversation via
+            // PreToolUse — fence it. Residual tradeoff (documented in the
+            // P1 fence report): a genuine "blocked" verdict's own CONFLICT
+            // banner is commingled in this same block and is therefore also
+            // marked "treat as information" — this is intentional (an
+            // injected FAKE correction must not auto-execute either) but is
+            // worth knowing about if the blocked-verdict banner's real-world
+            // compliance rate is ever measured.
+            process.stdout.write(core.fenceMemory(warningLines.join("\n")) + "\n");
           }
           // If result.warning is null (no matches), print nothing
         } catch {
@@ -1130,19 +2204,9 @@ async function main(): Promise<void> {
       // Reads UserPromptSubmit JSON from stdin.
       // Detects save-intent phrases and injects a prompt for Claude to call session_end().
       // Always exits 0 — never blocks the conversation.
-      const SAVE_PATTERNS = [
-        /\bsave\s+(?:the\s+|this\s+)?session\b/i,
-        /\bsave\s+this\b/i,
-        /\bretain\s+this\b/i,
-        /\bcheckpoint\b/i,
-        /\bdon'?t\s+forget\s+this\b/i,
-        /\bkeep\s+a\s+note\b/i,
-        /\bwrite\s+(?:this\s+)?down\b/i,
-        /\bremember\s+(?:this|that|what we did)\b/i,
-        /\bbookmark\s+this\b/i,
-        /\blog\s+this\b/i,
-        /保存|记录一下|存档|别忘了|记住这个|写下来/,
-      ];
+      // Save-intent vocabulary is owned by durable-intent.ts (SINGLE SOURCE OF TRUTH).
+      // saveTriggerKind() is the shared arbiter used by both hook-save and the
+      // cross-surface capture-path two-lane router — no inline SAVE_PATTERNS here.
 
       try {
         const chunks: Buffer[] = [];
@@ -1160,7 +2224,11 @@ async function main(): Promise<void> {
 
         if (!prompt || prompt.length < 4) process.exit(0);
 
-        const isSaveIntent = SAVE_PATTERNS.some((p) => p.test(prompt));
+        // Non-semantic harness artifact early-exit (FIX 1): task-notifications
+        // must never trigger a save-intent detection or inject any output.
+        if (/^(<task-notification>|<agent-message|<local-command-caveat>|<command-name>|<system-reminder>)/i.test(prompt.trimStart())) process.exit(0);
+
+        const isSaveIntent = core.saveTriggerKind(prompt) === "explicit-save";
         if (!isSaveIntent) process.exit(0);
 
         // Inject signal — Claude reads this and calls session_end()
@@ -1185,7 +2253,11 @@ async function main(): Promise<void> {
         delta: corrDelta || `Manual correction recorded: "${corrCorrection.slice(0, 80)}"`,
         project,
       });
-      output(result);
+      // P1 fence (class-sweep): `ar correct` calls the SAME core.check() used
+      // by the check MCP tool (named fix) — watch_for/similar_past_deltas/
+      // action_check carry the identical matching_rules/corrections/insights
+      // payload. Same surface, different entry point; fence identically.
+      outputFenced(result);
       break;
     }
 
@@ -1216,11 +2288,14 @@ async function main(): Promise<void> {
           includeGlobal: !hasFlag("--no-global", digRest),
           limit: limit ? parseInt(limit) : 5,
         });
-        output({ query, digests, result_count: digests.length });
+        // P1 fence (class-sweep, AR_EXTRAS quarantine zone): same rationale
+        // as the digest MCP tool's `recall`/`read` actions — digest content
+        // was written by a PRIOR (possibly different) session's `store` call.
+        outputFenced({ query, digests, result_count: digests.length });
 
       } else if (sub === "list") {
         const entries = core.listDigests(project ?? "auto", { stale: hasFlag("--stale", digRest) ? undefined : false });
-        output(entries);
+        outputFenced(entries);
       } else if (sub === "invalidate") {
         const id = digRest.find((a) => !a.startsWith("--")) ?? "";
         const reason = getFlag("--reason", digRest) ?? "manually invalidated";
@@ -1267,7 +2342,12 @@ async function main(): Promise<void> {
       const { readTodaySessions } = await import("./utils/transcript-reader.js");
       const dryRun = hasFlag("--dry-run", rest);
       const today = new Date().toISOString().slice(0, 10);
-      const arRoot = path.join(os.homedir(), ".agent-recall", "projects");
+      // Dead-code removal (2026-08-12, followups wave): `arRoot` was declared
+      // here but never read anywhere in this case block (grep-confirmed) —
+      // the actual writes go through core.sessionEnd() below, which already
+      // resolves its own root via getRoot(). Not a root-resolution bypass
+      // (nothing ever executed that used this value); removed as dead code
+      // flagged during the os.homedir() bypass-class enumeration.
 
       const sessions = readTodaySessions();
       if (sessions.length === 0) {
@@ -1373,7 +2453,10 @@ async function main(): Promise<void> {
 
     case "stats": {
       // Diagnostic: show memory system health numbers
-      const statsRoot = path.join(os.homedir(), ".agent-recall");
+      // Root-fix (2026-08-12, followups wave): same bypass class as
+      // logSyncError — `ar stats --root X` previously ignored --root entirely
+      // and always read the REAL user's ~/.agent-recall, giving wrong counts.
+      const statsRoot = core.getRoot();
       const statsProject = project ?? "auto";
 
       // Resolve project
@@ -1483,15 +2566,29 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
       } catch { /* non-blocking */ }
 
       // 4. Read room summaries
+      //
+      // Identity-trust (P0 independent-review FIX 3, 2026-08-30,
+      // wave/pipe-p0-trustclass): was a raw fs.readFileSync of each room's
+      // README.md with ZERO rescue-tag check, found while extending the
+      // completeness harness's auto-scanner to packages/cli/src (the same
+      // vulnerability class as gap #3/#11 — a hijacked room README's
+      // fabricated content, keyword-extracted here, would be written
+      // VERBATIM into this project's own Claude auto-memory file
+      // (ar_sync_<slug>.md/SYNC.md below) — an even higher-exposure
+      // destination than handoff.md, since it lands directly in another
+      // tool's own persistent memory store). Routed through
+      // readTierCandidates (trust-tagged + safe-by-default) instead of a
+      // raw readFileSync.
       let syncRooms: Array<{name: string; topKeywords: string[]}> = [];
       try {
         const roomList = core.listRooms(resolvedSync);
         for (const r of roomList.slice(0, 5)) {
           try {
-            const pd = core.palaceDir(resolvedSync);
-            const readmePath = path.join(pd, "rooms", r.slug, "README.md");
-            if (fs.existsSync(readmePath)) {
-              const content = fs.readFileSync(readmePath, "utf-8").slice(0, 300);
+            const readmeCandidate = core
+              .readTierCandidates("palace-room", resolvedSync, { room: r.slug })
+              .find((c) => c.file === "README.md");
+            if (readmeCandidate) {
+              const content = readmeCandidate.content.slice(0, 300);
               const kw = core.extractKeywords(content, 3);
               syncRooms.push({ name: r.name, topKeywords: kw });
             }
@@ -1499,14 +2596,26 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
         }
       } catch { /* non-blocking */ }
 
-      // 5. Build the markdown
-      const syncLines: string[] = [
+      // 5. Build the markdown.
+      // P1 fence (class-sweep — highest-severity finding): this command
+      // WRITES retrieved memory content (correction rule text, insight
+      // titles, journal brief excerpt, room keywords) directly into a file
+      // under Claude Code's own auto-loaded `memory/` directory — not a
+      // one-shot stdout print but a PERSISTED surface that every future
+      // session in this host silently ingests into its system prompt. The
+      // YAML frontmatter is a structural file-format header (parsed by the
+      // host, not agent-facing prose) and is kept OUTSIDE the fence so
+      // wrapping it cannot corrupt that parsing; the body (from the H1 title
+      // down) is entirely memory-derived and fenced as one block below.
+      const syncFrontmatter = [
         `---`,
         `name: AgentRecall sync — ${resolvedSync}`,
         `description: Auto-generated from AgentRecall. P0 corrections, top insights, recent context, palace rooms.`,
         `type: reference`,
         `---`,
         ``,
+      ].join("\n");
+      const syncLines: string[] = [
         `# AgentRecall Context — ${resolvedSync}`,
         `> Auto-synced. Do not edit manually. Regenerate with: \`ar sync-memory --project ${resolvedSync}\``,
         ``,
@@ -1542,11 +2651,29 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
         syncLines.push(``);
       }
 
-      const syncContent = syncLines.join("\n");
+      // Regression fix (P1 completeness pass, 2026-08-19): syncFrontmatter's
+      // array ends in a single trailing "" element, which Array.join("\n")
+      // resolves to exactly ONE trailing "\n" after the closing `---` (the
+      // empty string contributes no newline of its OWN — join only inserts
+      // separators BETWEEN elements). Before the fencing rework this was
+      // invisible: `syncLines` used to start right after that "" element in
+      // the SAME array, so the join naturally produced a blank line before
+      // `# AgentRecall Context`. Splitting frontmatter into its own
+      // `syncFrontmatter` string lost that second newline — the fenced body
+      // now started immediately after `---` with no blank-line separator
+      // (`---\n⟦agentrecall:memory⟧...` instead of `---\n\n⟦agentrecall:memory⟧...`).
+      // Restore the blank line explicitly at the join point rather than
+      // relying on array-trailing-empty-string arithmetic again.
+      const syncContent = syncFrontmatter + "\n" + core.fenceMemory(syncLines.join("\n").trimEnd()) + "\n";
 
       // Write to Claude's memory directory
       const memDir = path.join(os.homedir(), ".claude", "projects", `-Users-${os.userInfo().username}`, "memory");
-      const arRoot = path.join(os.homedir(), ".agent-recall");
+      // Root-fix (2026-08-12, followups wave): fallback path (below, when
+      // memDir doesn't exist) is AR's OWN project data — same bypass class as
+      // logSyncError. `memDir` above is intentionally left as os.homedir()
+      // (Claude Code's own memory directory, a different tool's storage that
+      // always lives in the real machine home regardless of AGENT_RECALL_ROOT).
+      const arRoot = core.getRoot();
       if (fs.existsSync(memDir)) {
         const syncPath = path.join(memDir, `ar_sync_${resolvedSync.toLowerCase()}.md`);
         fs.writeFileSync(syncPath, syncContent, "utf-8");
@@ -1571,7 +2698,15 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
       const roomList = core.listRooms(resolvedRoom);
       const pd = core.palaceDir(resolvedRoom);
 
-      output(`Palace rooms — ${resolvedRoom}\n`);
+      // P1 fence (completeness-pass MEDIUM re-triage, 2026-08-19): each
+      // room's `description` is free text set at room-creation time
+      // (possibly by an earlier session) — the same risk class as any
+      // other retrieved prose field, previously deferred as "lower
+      // priority than prose-block surfaces". Build the whole room list as
+      // ONE block and fence it once (O(1) per block, matching every other
+      // multi-item renderer in this file) rather than per-line; the
+      // header (project slug only, not retrieved content) stays outside.
+      const roomLines: string[] = [];
       for (const r of roomList) {
         const roomPath = path.join(pd, "rooms", r.slug);
         let entryCount = 0;
@@ -1586,9 +2721,11 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
             entryCount += entryMatches ? entryMatches.length : 0;
           }
         }
-        output(`  ${r.name} (${entryCount} entries, salience ${r.salience.toFixed(2)})`);
-        if (r.description) output(`    ${r.description}`);
+        roomLines.push(`  ${r.name} (${entryCount} entries, salience ${r.salience.toFixed(2)})`);
+        if (r.description) roomLines.push(`    ${r.description}`);
       }
+      output(`Palace rooms — ${resolvedRoom}\n`);
+      output(roomLines.length > 0 ? core.fenceMemory(roomLines.join("\n")) : "  (no rooms)");
       break;
     }
 
@@ -1638,7 +2775,11 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           }
         }
         output(``);
-        output(`  Run ar cold-start to see your projects.`);
+        const board = await core.projectBoard();
+        const boardWidth = process.stdout.columns
+          ? Math.min(110, Math.max(80, process.stdout.columns))
+          : 100;
+        output(core.renderBoard(board, { boardWidth }));
         output(`${LINE}`);
       } else if (dryRun) {
         // ── ar bootstrap --dry-run ────────────────────────────────────────
@@ -1758,15 +2899,21 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
       if (rest[0] === "supabase") {
         if (rest.includes("--backfill")) {
           const { backfill } = await import("agent-recall-core");
-          const homeDir = os.homedir();
-          const projectsDir = path.join(homeDir, ".agent-recall", "projects");
+          // Root-fix (2026-08-12, followups wave): was os.homedir() literal —
+          // same bypass class as logSyncError, and a real user-facing bug:
+          // `ar setup supabase --backfill --root X` silently backfilled the
+          // REAL user's store instead of X. Also duplicated (with a stale
+          // literal) what core.readSupabaseConfig() already resolves via
+          // getRoot() — see packages/core/src/supabase/config.ts.
+          const arStoreRoot = core.getRoot();
+          const projectsDir = path.join(arStoreRoot, "projects");
 
           if (!fs.existsSync(projectsDir)) {
             output("No projects found at ~/.agent-recall/projects/");
             break;
           }
 
-          const configPath = path.join(homeDir, ".agent-recall", "config.json");
+          const configPath = path.join(arStoreRoot, "config.json");
           if (!fs.existsSync(configPath)) {
             output("Supabase not configured — run 'ar setup supabase' first.");
             break;
@@ -1779,43 +2926,15 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           let totalSynced = 0, totalSkipped = 0, totalFailed = 0;
 
           for (const slug of slugs) {
-            const slugDir = path.join(projectsDir, slug);
-            const files: Array<{ path: string; content: string; store: "journal" | "palace" | "awareness" | "digest"; room?: string }> = [];
-
-            // Journal files
-            const journalDir = path.join(slugDir, "journal");
-            if (fs.existsSync(journalDir)) {
-              for (const f of fs.readdirSync(journalDir).filter((f) => f.endsWith(".md"))) {
-                const fp = path.join(journalDir, f);
-                try {
-                  files.push({ path: fp, content: fs.readFileSync(fp, "utf-8"), store: "journal" });
-                } catch {
-                  totalFailed++;
-                }
-              }
-            }
-
-            // Palace room files
-            const roomsDir = path.join(slugDir, "palace", "rooms");
-            if (fs.existsSync(roomsDir)) {
-              for (const room of fs.readdirSync(roomsDir)) {
-                const roomPath = path.join(roomsDir, room);
-                try {
-                  if (!fs.statSync(roomPath).isDirectory()) continue;
-                } catch {
-                  totalFailed++;
-                  continue;
-                }
-                for (const f of fs.readdirSync(roomPath).filter((f) => f.endsWith(".md"))) {
-                  const fp = path.join(roomPath, f);
-                  try {
-                    files.push({ path: fp, content: fs.readFileSync(fp, "utf-8"), store: "palace", room });
-                  } catch {
-                    totalFailed++;
-                  }
-                }
-              }
-            }
+            // Identity-trust (P0 trust-class closure, 2026-08-30,
+            // wave/pipe-p0-trustclass): was a raw fs.readdirSync+readFileSync
+            // scan of BOTH the journal and palace/rooms directories with ZERO
+            // rescue-tag check — the SAME vulnerability class as gap #5
+            // (session-start.ts's autoBackfill), a second independent call
+            // site found while auditing that gap. core.gatherProjectBackfillFiles
+            // sources the same two directories exclusively via
+            // readTierCandidates (trust-tagged + safe-by-default).
+            const files = core.gatherProjectBackfillFiles(slug);
 
             if (files.length === 0) continue;
 
@@ -1828,7 +2947,7 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           }
 
           // Global awareness file — synced once after all slugs, keyed as "global"
-          const awarenessPath = path.join(homeDir, ".agent-recall", "awareness.md");
+          const awarenessPath = path.join(arStoreRoot, "awareness.md");
           if (fs.existsSync(awarenessPath)) {
             try {
               const awarenessFiles: Array<{ path: string; content: string; store: "journal" | "palace" | "awareness" | "digest"; room?: string }> = [];
@@ -1845,6 +2964,17 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           }
 
           output(`\nBackfill complete — synced: ${totalSynced}, skipped: ${totalSkipped}, failed: ${totalFailed}`);
+          // P0 independent-review FIX 5 (2026-08-30): `failed` above counts
+          // Supabase-side sync errors only (backfill()'s own try/catch,
+          // per file). `core.gatherProjectBackfillFiles`'s underlying
+          // reader (retrieval/candidates.ts's `safeReadFile`) silently
+          // SKIPS a local file it cannot read (permission error, race with
+          // a concurrent delete, etc.) rather than throwing or signaling —
+          // that file never even reaches `files`, so its absence is not
+          // reflected in ANY of the three counters above. Documented here
+          // rather than plumbing a new failure-count field through the
+          // shared, widely-consumed candidate reader for this one caller.
+          output(`  (note: "failed" counts Supabase-side sync errors only — a local file this machine could not read is silently skipped upstream and is not counted here)`);
           break;
         }
 
@@ -1868,6 +2998,11 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
           embedding_provider: embeddingProvider as "openai" | "voyage",
           embedding_api_key: embeddingKey.trim(),
           sync_enabled: true,
+          // Privacy boundary (Decision #6): personal data stays local by default.
+          sync_personal: false,
+          // Second opt-in for corrections (PERSONAL_PATH_MARKER). Both sync_personal
+          // AND sync_corrections must be true before corrections leave the machine.
+          sync_corrections: false,
         });
 
         output("\nConfig saved to ~/.agent-recall/config.json");
@@ -1876,6 +3011,370 @@ ${correctionCount === 0 ? "\n  Warning: No corrections captured yet. Use the too
       } else {
         process.stderr.write(`Unknown setup subcommand: ${rest[0] ?? "(none)"}\nUsage: ar setup supabase [--backfill]\n`);
         process.exit(1);
+      }
+      break;
+    }
+
+    // -----------------------------------------------------------------------
+    // ar outcomes — dream-audit verdict surface (C3b)
+    // -----------------------------------------------------------------------
+    case "outcomes": {
+      const sub = rest[0];
+      const outRest = rest.slice(1);
+
+      if (sub === "--help" || sub === "-h" || !sub) {
+        output(`ar outcomes — dream-audit verdict surface (C3b) + ledger rebuild (TOW2-321 follow-up)
+
+SUBCOMMANDS:
+  ar outcomes audit-candidates [--project <slug>] [--date YYYY-MM-DD]
+      List corrections retrieved on <date> (default: yesterday) whose verdict is
+      still unknown (no heeded/recurred/not_triggered recorded). Output is JSON.
+      Fields: id, rule, severity, tags, retrieved_date, journal_file_paths
+
+  ar outcomes record --project <slug> --id <correction-id> \\
+      --kind not_triggered|recurred|heeded --evidence "<text>" [--audit-date YYYY-MM-DD]
+      Record a dream-audit verdict for one correction. Rules:
+        - evidence string is REQUIRED and prefixed "dream-audit:" automatically.
+        - not_triggered is ONLY accepted from this path (enforced here).
+        - --audit-date sets the outcome timestamp (default: yesterday). Pass the
+          same date used in audit-candidates so dedup works correctly.
+        - 1/day dedup: if a covered verdict already exists for this id×audit-date, skipped.
+      Output: { success, correction_id, project, kind, evidence, at, audit_date, skipped_reason? }
+
+  ar outcomes rebuild --project <slug> [--apply] [--json]
+      Recompute every correction's outcome counters (retrieved/heeded/recurrence/
+      predicted/predict_hits + precision/predict_precision/proof_confidence) from
+      a full replay of the lossless _outcomes.jsonl ledger. Repairs records whose
+      materialized counters were corrupted by the pre-05b3699 unlocked
+      read-modify-write in recordOutcome (or diverged for any other reason).
+        - DRY-RUN by default: computes and reports the full before/after plan,
+          writes nothing. Pass --apply to actually rewrite the divergent records.
+        - Malformed ledger lines are quarantined (reported, never crash the run).
+        - Idempotent: re-running --apply on an already-rebuilt store is a no-op.
+
+agent_instruction: use "audit-candidates" to list unknown-verdict corrections for a date,
+  then "record" to write a verdict. Always pass --audit-date matching the retrieved_date
+  from audit-candidates output. Quote session evidence in --evidence. Never default to heeded.
+  Use "rebuild" (dry-run first, then --apply) after \`ar doctor\` flags outcomes_ledger_divergence.`);
+        break;
+      }
+
+      if (sub === "rebuild") {
+        const rebuildProject = getFlag("--project", outRest) ?? project;
+        if (!rebuildProject) {
+          process.stderr.write(
+            `Error: --project is required for outcomes rebuild\n` +
+            `Usage: ar outcomes rebuild --project <slug> [--apply] [--json]\n` +
+            `agent_instruction: provide --project <slug> to scope the rebuild\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+
+        const apply = hasFlag("--apply", outRest);
+        try {
+          const slug = await core.resolveProject(rebuildProject);
+          const result = core.runOutcomesRebuild(slug, { apply });
+
+          if (hasFlag("--json", outRest)) {
+            output(result);
+          } else {
+            const verb = result.apply ? "rebuilt" : "would rebuild (dry-run)";
+            const lines: string[] = [
+              `outcomes ${verb}: ${result.summary.changed}/${result.summary.totalCorrections} correction(s) changed` +
+                (result.summary.malformed > 0
+                  ? `, ${result.summary.malformed} malformed ledger row(s) quarantined`
+                  : ""),
+            ];
+            for (const c of result.corrections.filter((c) => c.changed).slice(0, 20)) {
+              lines.push(`  ${c.id}:`);
+              lines.push(`    before: ${JSON.stringify(c.before)}`);
+              lines.push(`    after:  ${JSON.stringify(c.after)}`);
+            }
+            if (result.malformedRows.length > 0) {
+              lines.push(
+                `  ⚠ malformed ledger row(s): ${result.malformedRows.slice(0, 5).map((m) => `line ${m.line} (${m.error})`).join("; ")}`,
+              );
+            }
+            if (!apply) lines.push("  (dry-run — pass --apply to write these changes)");
+            output(lines.join("\n"));
+          }
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(
+            `Error rebuilding outcomes: ${msg}\n` +
+            `agent_instruction: check that --project is a valid resolvable project slug\n`
+          );
+          process.exitCode = 1;
+        }
+        break;
+      }
+
+      if (sub === "audit-candidates") {
+        const auditProject = getFlag("--project", outRest) ?? project;
+        const auditDate = getFlag("--date", outRest);
+
+        if (!auditProject) {
+          process.stderr.write(
+            `Error: --project is required for outcomes audit-candidates\n` +
+            `Usage: ar outcomes audit-candidates --project <slug> [--date YYYY-MM-DD]\n` +
+            `agent_instruction: provide --project <slug> to scope the audit\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+        if (auditDate && !/^\d{4}-\d{2}-\d{2}$/.test(auditDate)) {
+          process.stderr.write(
+            `Error: --date must be YYYY-MM-DD, got: "${auditDate}"\n` +
+            `agent_instruction: use ISO date format YYYY-MM-DD (e.g. 2026-07-02)\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+
+        try {
+          const slug = await core.resolveProject(auditProject);
+          const candidates = core.listUnknownVerdicts(slug, auditDate);
+          // P1 fence (class-sweep): each candidate carries the original
+          // correction `rule` text (per this command's own --help: "Fields:
+          // id, rule, severity, tags, retrieved_date, journal_file_paths").
+          outputFenced(candidates);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(
+            `Error listing audit candidates: ${msg}\n` +
+            `agent_instruction: check that project slug is valid and has a corrections store\n`
+          );
+          process.exitCode = 1;
+        }
+        break;
+      }
+
+      if (sub === "record") {
+        const recProject = getFlag("--project", outRest) ?? project;
+        const recId = getFlag("--id", outRest);
+        const recKindRaw = getFlag("--kind", outRest);
+        const recEvidence = getFlag("--evidence", outRest);
+        // --audit-date: the date being audited (YYYY-MM-DD). The outcome's `at` timestamp
+        // is set to noon UTC on this date so that listUnknownVerdicts finds it as covered
+        // when re-queried for that date. Defaults to yesterday (the dream audits yesterday's sessions).
+        const auditDateRaw = getFlag("--audit-date", outRest);
+
+        // Validate required args
+        const missingArgs: string[] = [];
+        if (!recProject) missingArgs.push("--project");
+        if (!recId) missingArgs.push("--id");
+        if (!recKindRaw) missingArgs.push("--kind");
+        if (!recEvidence) missingArgs.push("--evidence");
+        if (missingArgs.length > 0) {
+          process.stderr.write(
+            `Error: missing required flags: ${missingArgs.join(", ")}\n` +
+            `Usage: ar outcomes record --project <slug> --id <correction-id> --kind not_triggered|recurred|heeded --evidence "<text>" [--audit-date YYYY-MM-DD]\n` +
+            `agent_instruction: provide all required flags; --evidence must contain the actual evidence text\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+
+        // Validate --audit-date if supplied
+        if (auditDateRaw && !/^\d{4}-\d{2}-\d{2}$/.test(auditDateRaw)) {
+          process.stderr.write(
+            `Error: --audit-date must be YYYY-MM-DD, got: "${auditDateRaw}"\n` +
+            `agent_instruction: use ISO date YYYY-MM-DD for --audit-date (e.g. yesterday's date)\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+
+        // Validate kind — only these three are accepted from this path
+        const ALLOWED_KINDS = ["not_triggered", "recurred", "heeded"] as const;
+        type AllowedKind = typeof ALLOWED_KINDS[number];
+        if (!ALLOWED_KINDS.includes(recKindRaw as AllowedKind)) {
+          process.stderr.write(
+            `Error: --kind must be one of: not_triggered, recurred, heeded (got: "${recKindRaw}")\n` +
+            `agent_instruction: use exactly one of: not_triggered (correction never triggered), ` +
+            `recurred (agent violated it), heeded (agent followed it with check-action evidence)\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+        const recKind = recKindRaw as AllowedKind;
+
+        // Enforce: not_triggered is ONLY produced from this dream-audit path.
+        // The evidence prefix "dream-audit:" is the MANDATORY marker. Any not_triggered
+        // without this prefix would indicate an unauthorized producer; we enforce it here.
+        if (!recEvidence || recEvidence.trim().length < 4) {
+          process.stderr.write(
+            `Error: --evidence must be non-empty (min 4 chars); quote the actual session evidence\n` +
+            `agent_instruction: evidence must describe what you observed in the journal — ` +
+            `quote the session text or describe the absence of the trigger topic explicitly\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+
+        // Prefix is mandatory and identifies dream-audit as the producer.
+        // Strip any user-supplied leading "dream-audit:" (case-insensitive,
+        // repeated) BEFORE prepending — a spoofed/echoed prefix must not
+        // double-stack ("dream-audit:dream-audit:…") or inflate ledger counts.
+        let bareEvidence = recEvidence!.trim();
+        while (/^dream-audit:/i.test(bareEvidence)) {
+          bareEvidence = bareEvidence.replace(/^dream-audit:/i, "").trim();
+        }
+        if (bareEvidence.length < 4) {
+          process.stderr.write(
+            `Error: --evidence must contain ≥4 chars of actual evidence after removing any "dream-audit:" prefix\n` +
+            `agent_instruction: pass the evidence text WITHOUT the prefix — the CLI adds it\n`
+          );
+          process.exitCode = 1;
+          break;
+        }
+        const evidenceWithPrefix = `dream-audit:${bareEvidence}`;
+
+        try {
+          const slug = await core.resolveProject(recProject!);
+
+          // Resolve the audit date: explicit --audit-date, or yesterday (default for nightly dream).
+          // The outcome's `at` is timestamped to noon UTC on the audit date so that
+          // listUnknownVerdicts (which buckets by local-TZ day) classifies this event
+          // as occurring on the same day the correction was retrieved. This is what lets
+          // the audit-candidates re-query show the correction as covered after record runs.
+          const auditDay = auditDateRaw
+            ? auditDateRaw
+            : new Date(Date.now() - 86400000).toLocaleDateString("sv");
+          // noon UTC on the audit day (date-TZ agnostic — "sv" locale gives YYYY-MM-DD already)
+          const atForAuditDay = `${auditDay}T12:00:00.000Z`;
+
+          // 1/day dedup: check if a covered verdict already exists for this id on the audit date.
+          const auditDayOutcomes = core.readOutcomesOnDate(slug, auditDay);
+          const existingKinds = auditDayOutcomes.get(recId!);
+          const COVERED = new Set(["heeded", "recurred", "not_triggered"]);
+          if (existingKinds && [...existingKinds].some((k) => COVERED.has(k))) {
+            const existing = [...existingKinds].filter((k) => COVERED.has(k));
+            output({
+              success: false,
+              skipped_reason: "1/day dedup: a covered verdict already exists for this correction on the audit date",
+              correction_id: recId,
+              project: slug,
+              existing_verdicts: existing,
+              audit_date: auditDay,
+            });
+            break;
+          }
+
+          core.recordOutcome({
+            correction_id: recId!,
+            project: slug,
+            kind: recKind,
+            at: atForAuditDay,
+            evidence: evidenceWithPrefix,
+          });
+
+          output({
+            success: true,
+            correction_id: recId,
+            project: slug,
+            kind: recKind,
+            evidence: evidenceWithPrefix,
+            at: atForAuditDay,
+            audit_date: auditDay,
+          });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stderr.write(
+            `Error recording outcome: ${msg}\n` +
+            `agent_instruction: check correction-id exists in the project and slug is valid\n`
+          );
+          process.exitCode = 1;
+        }
+        break;
+      }
+
+      // Unknown subcommand
+      process.stderr.write(
+        `Unknown outcomes subcommand: ${sub}\n` +
+        `Usage: ar outcomes audit-candidates|record|rebuild [...]\n` +
+        `Run: ar outcomes --help\n` +
+        `agent_instruction: use "audit-candidates" to list unknowns, "record" to write a verdict, "rebuild" to recompute counters from the ledger\n`
+      );
+      process.exitCode = 1;
+      break;
+    }
+
+    case "scrub": {
+      // Fail-CLOSED stdin scrub — the same guarantee Supabase's doSync has, but
+      // exposed as a CLI primitive so every downstream egress path (user scripts,
+      // bridges, CI) can share it.
+      //
+      // Fail-CLOSED pattern classes (scrubForExport re-scans output and throws on
+      // residue so these are guaranteed to not survive to stdout):
+      //   AKIA…         — AWS access key
+      //   ghp_/gho_/ghs_/github_pat_/ghr_ — GitHub token family
+      //   sk-…          — OpenAI / Anthropic secret key (≥20 chars)
+      //   xoxb-/xoxp-   — Slack bot / user token
+      //   npm_…         — npm registry token
+      //   _authToken=…  — npm _authToken (.npmrc)
+      //   PEM private key / certificate blocks
+      //
+      // Fail-OPEN (deliberately not scanned — documented scope decision, §4.6):
+      //   Authorization: Bearer <jwt> — high false-positive rate on normal journal
+      //   content; JWTs are short-lived. This is a known gap, not a silent one.
+      const { scrubForExport, scrubPromptInjection, scrubSecretContent, SecretScanError: ScrubError } = await import("agent-recall-core");
+      const checkMode = hasFlag("--check", rest);
+
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        process.stdin.on("data", (chunk: Buffer) => chunks.push(chunk));
+        process.stdin.on("end", resolve);
+        process.stdin.on("error", reject);
+      });
+
+      const rawInput = Buffer.concat(chunks).toString("utf-8");
+
+      if (checkMode) {
+        // --check: detection only, no stdout rewrite.
+        // Layer 1: injection scrub is not relevant to secret detection; scan raw.
+        // Layer 2: scrubSecretContent detects secret patterns.
+        const { redactedCount } = scrubSecretContent(rawInput);
+        if (redactedCount === 0) {
+          // No secrets found — clean.
+          process.exitCode = 0;
+        } else {
+          // Secrets found — run scrubForExport to determine if any survive.
+          try {
+            scrubForExport(rawInput);
+            // scrubForExport did not throw — secrets were redactable, none survived.
+            process.exitCode = 1;
+          } catch (e) {
+            if (e instanceof ScrubError) {
+              // scrub-resistant residue — secret survived even after redaction attempt.
+              process.stderr.write(
+                `scrub-resistant: ${e.message}\n` +
+                `agent_instruction: content contains a secret pattern that survived the export scrub — remove or redact the raw secret before piping to ar scrub\n`
+              );
+              process.exitCode = 2;
+            } else {
+              throw e;
+            }
+          }
+        }
+      } else {
+        // Default: scrub and emit to stdout. Exit 0 on success, 2 on fail-closed throw.
+        try {
+          const scrubbed = scrubForExport(rawInput);
+          process.stdout.write(scrubbed);
+          process.exitCode = 0;
+        } catch (e) {
+          if (e instanceof ScrubError) {
+            process.stderr.write(
+              `scrub failed (exit 2): ${e.message}\n` +
+              `agent_instruction: content contains a secret pattern that survived the export scrub — nothing was written to stdout. Remove or pre-redact the raw secret before piping to ar scrub.\n`
+            );
+            process.exitCode = 2;
+          } else {
+            throw e;
+          }
+        }
       }
       break;
     }

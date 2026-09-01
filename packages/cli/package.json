@@ -1,6 +1,6 @@
 {
   "name": "agent-recall-cli",
-  "version": "3.4.23",
+  "version": "3.4.47",
   "description": "CLI for AgentRecall memory system",
   "type": "module",
   "bin": {
@@ -11,7 +11,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/index.js",
     "test": "node --test test/*.test.mjs"
   },
   "keywords": [
@@ -19,14 +19,28 @@
     "ai-memory",
     "cli",
     "memory-palace",
-    "agent-memory"
+    "agent-memory",
+    "mcp",
+    "persistent-memory",
+    "correction-tracking",
+    "claude-code",
+    "claude-mcp",
+    "agent-learning",
+    "session-memory",
+    "compounding-memory"
   ],
   "dependencies": {
-    "agent-recall-core": "3.4.23"
+    "agent-recall-core": "3.4.47"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Goldentrii/AgentRecall-X.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/Goldentrii/AgentRecall-X#readme"
 }

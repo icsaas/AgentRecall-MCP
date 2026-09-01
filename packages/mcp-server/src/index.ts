@@ -3,6 +3,8 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { VERSION, getRoot, getLegacyRoot } from "agent-recall-core";
 import { server } from "./server.js";
+import { installAmbientCapture } from "./lib/ambient-capture.js";
+import { installLifecycleExitHandlers } from "./lib/lifecycle-exit.js";
 
 // ── v3.4 primary tools (5-tool surface) ──────────────────────────────────
 import { register as registerSessionStart } from "./tools/session-start.js";
@@ -10,33 +12,21 @@ import { register as registerRemember } from "./tools/remember.js";
 import { register as registerRecall } from "./tools/recall.js";
 import { register as registerSessionEnd } from "./tools/session-end.js";
 import { register as registerCheck } from "./tools/check.js";
-import { register as registerDigest } from "./tools/digest.js";
-import { register as registerProjectBoard } from "./tools/project-board.js";
-import { register as registerProjectStatus } from "./tools/project-status.js";
-import { register as registerBootstrap } from "./tools/bootstrap.js";
-import { register as registerMemoryQuery } from "./tools/memory-query.js";
 
-// ── Pipeline tools (experimental — project narrative spine) ──────────────
+// ── Pre-action proactive matcher (--full) ────────────────────────────────
+import { register as registerCheckAction } from "./tools/check-action.js";
+
+// ── AR_EXTRAS quarantine zone — purity-census-2026-07-05 ─────────────────
+// These tools are ZOMBIE/low-use (pipeline: 1 organic use in 60d; register_rule: 2;
+// digest: 0 MCP calls). Core logic files stay untouched for reversibility.
+// Activate with: AR_EXTRAS=1 npx agent-recall-mcp --full
 import { register as registerPipelineOpen } from "./tools/pipeline-open.js";
 import { register as registerPipelineClose } from "./tools/pipeline-close.js";
 import { register as registerPipelineList } from "./tools/pipeline-list.js";
 import { register as registerPipelineCurrent } from "./tools/pipeline-current.js";
 import { register as registerPipelineShow } from "./tools/pipeline-show.js";
-
-// ── Skill tools (procedural memory layer) ─────────────────────────────────
-import { register as registerSkillWrite } from "./tools/skill-write.js";
-import { register as registerSkillRecall } from "./tools/skill-recall.js";
-import { register as registerSkillList } from "./tools/skill-list.js";
-
-// ── Dashboard + reflection ───────────────────────────────────────────────
-import { register as registerDashboardExport } from "./tools/dashboard-export.js";
-import { register as registerSessionEndReflect } from "./tools/session-end-reflect.js";
-
-// ── Behavior policies (always-loaded IF-THEN rules) ──────────────────────
 import { register as registerRegisterRule } from "./tools/register-rule.js";
-
-// ── Pre-action proactive matcher (items 3 + 5) ──────────────────────────
-import { register as registerCheckAction } from "./tools/check-action.js";
+import { register as registerDigest } from "./tools/digest.js";
 
 // ── Legacy tools (still importable for SDK/CLI, not registered by default) ──
 // DEPRECATED v3.4: use session_start instead
@@ -69,6 +59,19 @@ import { register as registerCheckAction } from "./tools/check-action.js";
 // import { register as registerKnowledgeRead } from "./tools/knowledge-read.js";
 // import { register as registerPalaceRead } from "./tools/palace-read.js";
 // import { register as registerPalaceLint } from "./tools/palace-lint.js";
+// DELETED 2026-07-05 (P3b purity — owner checkmarks, all zero organic MCP use):
+// import { register as registerProjectBoard } from "./tools/project-board.js";
+// import { register as registerProjectStatus } from "./tools/project-status.js";
+// import { register as registerBootstrap } from "./tools/bootstrap.js";
+// import { register as registerMemoryQuery } from "./tools/memory-query.js";
+// import { register as registerSkillWrite } from "./tools/skill-write.js";
+// import { register as registerSkillRecall } from "./tools/skill-recall.js";
+// import { register as registerSkillList } from "./tools/skill-list.js";
+// import { register as registerDashboardExport } from "./tools/dashboard-export.js";
+// import { register as registerSessionEndReflect } from "./tools/session-end-reflect.js";
+// import { register as registerBrief } from "./tools/brief.js";
+// NOTE: bootstrap CLI command STAYS (ar bootstrap); skill logic stays (palace/skills.ts);
+//       session_end_reflect logic stays (ar consolidate); project_board logic stays (ar status).
 
 import { register as registerJournalResources } from "./resources/journal-resources.js";
 import { register as registerAwarenessResource } from "./resources/awareness-resource.js";
@@ -87,38 +90,29 @@ Everything else fires automatically via hooks or is available on demand with --f
 
 Usage:
   npx agent-recall-mcp              Start with 5 default tools (session_start, session_end, remember, recall, check)
-  npx agent-recall-mcp --full       Start with all tools (adds memory_query, check_action, register_rule,
-                                    pipeline_*, skill_*, dashboard_export, session_end_reflect,
-                                    project_board, project_status, digest, bootstrap)
+  npx agent-recall-mcp --full       Start with all active tools (adds check_action)
+  AR_EXTRAS=1 npx agent-recall-mcp --full  Add quarantined extras (pipeline_*, register_rule, digest)
   npx agent-recall-mcp --help       Show this help
   npx agent-recall-mcp --list-tools List available MCP tools (add --full to see full list)
 
 Default tools (5):
-  session_start          Load project context at session start — corrections, insights, warnings
-  session_end            Save journal, insights, trajectory — compounds memory over time
-  remember               Write a memory — auto-routes to the right store
-  recall                 Search all memory — BM25 + vector + RRF fusion + Hopfield rerank
-  check                  Record understanding; returns predictive warnings from past corrections
+  session_start          [ENTRY — call FIRST, before acting] Load project context at session start — corrections, insights, warnings
+  session_end            [ON SAVE/EXIT — YOU must call this; nothing auto-saves] Save journal, insights, trajectory — compounds memory over time
+  remember               [MID-SESSION WRITE — single fact/decision; saying it is not saving it] Write a memory — auto-routes to the right store
+  recall                 [RETRIEVE — use freely, any time] Search all memory — keyword/RRF fusion + optional vector (OpenAI key)
+  check                  [MID-SESSION — safe any time; for alignment, before risky decisions] Record understanding; anticipates the likely correction before you make it
 
 Full-mode additions (--full):
-  memory_query           Pull-on-demand recall mid-task
   check_action           Pre-action safety check (publish/push/deploy warnings)
-  register_rule          Save an IF-THEN behavior policy
+
+Quarantined extras (AR_EXTRAS=1 --full only):
   pipeline_open          Open a project narrative phase
   pipeline_close         Close active phase with reflection
   pipeline_list          List all narrative phases
   pipeline_current       Show currently active phase
   pipeline_show          Render full project narrative spine
-  skill_write            Save a procedural IF-THEN rule
-  skill_recall           Find skills matching an intent
-  skill_list             Browse all skills in a project
-  dashboard_export       Generate agent-readable dashboard.json snapshot
-  session_end_reflect    Park-2023 reflection bundle — distills last N journals
-  project_board          Status board across all projects
-  project_status         Quick project health check
+  register_rule          Save an IF-THEN behavior policy
   digest                 Context cache — store/recall/invalidate pre-computed analysis
-  bootstrap_scan         Discover existing projects on this machine
-  bootstrap_import       Import discovered projects into AgentRecall
 
 Storage: ${getRoot()}
 Legacy:  ${getLegacyRoot()}
@@ -130,42 +124,49 @@ Community: https://t.me/+ywZwoHrg3AM0NDVi
   process.exit(0);
 }
 
-// --full: register all tools including advanced/setup tools
+// --full: register active tools beyond the 5-tool default surface
+// AR_EXTRAS=1: also register quarantined extras (pipeline_*, register_rule, digest)
 // Default: 5 core tools only (minimal token overhead per session — Automaticity Law)
 const fullMode = args.includes("--full");
+const extrasMode = fullMode && process.env.AR_EXTRAS === "1";
 
 if (args.includes("--list-tools")) {
   const coreTools = [
-    { name: "session_start", description: "Load project context at session start — corrections, insights, watch_for warnings" },
-    { name: "session_end", description: "Save journal, insights, and trajectory — compounds memory over time" },
-    { name: "remember", description: "Save a memory — auto-routes to the right store" },
-    { name: "recall", description: "Search all memory stores, return ranked results with feedback" },
-    { name: "check", description: "Record understanding, get predictive warnings from past corrections" },
+    { name: "session_start", description: "[ENTRY — call FIRST, before acting] Load project context at session start — corrections, insights, watch_for warnings" },
+    { name: "session_end", description: "[ON SAVE/EXIT — YOU must call this; nothing auto-saves] Save journal, insights, and trajectory — compounds memory over time" },
+    { name: "remember", description: "[MID-SESSION WRITE — single fact/decision; saying it is not saving it] Save a memory — auto-routes to the right store" },
+    { name: "recall", description: "[RETRIEVE — use freely, any time] Search all memory stores, return ranked results with feedback" },
+    { name: "check", description: "[MID-SESSION — safe any time; for alignment, before risky decisions] Record understanding; anticipates the likely correction before you make it" },
   ];
+  // P3b purity-census-2026-07-05: only check_action remains in --full (owner-approved deletion of 11 tools).
+  // Default 5 / full 6 (core 5 + check_action) / extras 6+7=13.
   const fullOnlyTools = [
-    { name: "memory_query", description: "Pull-on-demand recall mid-task — query before decisions (--full)" },
     { name: "check_action", description: "Pre-action safety matcher — warns on publish/push/deploy (--full)" },
-    { name: "register_rule", description: "Save an IF-THEN behavior policy (--full)" },
-    { name: "pipeline_open", description: "Open a new project narrative phase (--full)" },
-    { name: "pipeline_close", description: "Close active phase with reflection fields (--full)" },
-    { name: "pipeline_list", description: "List all narrative phases as JSON summaries (--full)" },
-    { name: "pipeline_current", description: "Return content of the currently active phase (--full)" },
-    { name: "pipeline_show", description: "Render project narrative spine — all phases (--full)" },
-    { name: "skill_write", description: "Save a procedural IF-THEN rule (--full)" },
-    { name: "skill_recall", description: "Find skills matching an intent (--full)" },
-    { name: "skill_list", description: "Browse all skills in a project (--full)" },
-    { name: "dashboard_export", description: "Generate agent-readable dashboard.json snapshot (--full)" },
-    { name: "session_end_reflect", description: "Park-2023 reflection bundle — distills last N journals (--full)" },
-    { name: "project_board", description: "Status board across all projects (--full)" },
-    { name: "project_status", description: "Quick project health check (--full)" },
-    { name: "digest", description: "Context cache — store/recall/read/invalidate pre-computed analysis (--full)" },
-    { name: "bootstrap_scan", description: "Discover existing projects on this machine (--full)" },
-    { name: "bootstrap_import", description: "Import discovered projects into AgentRecall (--full)" },
   ];
-  const tools = fullMode ? [...coreTools, ...fullOnlyTools] : coreTools;
+  // Quarantined extras: registered only when AR_EXTRAS=1 (purity-census-2026-07-05)
+  const extrasTools = [
+    { name: "pipeline_open", description: "Open a new project narrative phase (AR_EXTRAS=1 --full)" },
+    { name: "pipeline_close", description: "Close active phase with reflection fields (AR_EXTRAS=1 --full)" },
+    { name: "pipeline_list", description: "List all narrative phases as JSON summaries (AR_EXTRAS=1 --full)" },
+    { name: "pipeline_current", description: "Return content of the currently active phase (AR_EXTRAS=1 --full)" },
+    { name: "pipeline_show", description: "Render project narrative spine — all phases (AR_EXTRAS=1 --full)" },
+    { name: "register_rule", description: "Save an IF-THEN behavior policy (AR_EXTRAS=1 --full)" },
+    { name: "digest", description: "Context cache — store/recall/read/invalidate pre-computed analysis (AR_EXTRAS=1 --full)" },
+  ];
+  let tools = coreTools;
+  if (fullMode) tools = [...tools, ...fullOnlyTools];
+  if (extrasMode) tools = [...tools, ...extrasTools];
   process.stdout.write(JSON.stringify(tools, null, 2) + "\n");
   process.exit(0);
 }
+
+// ── C-1 (Train C, 2026-08-12 wave) — passive ambient capture ────────────────
+// Must run BEFORE any register*(server) call below: wraps server.registerTool
+// once so EVERY tool registration (present AND future, default surface AND
+// --full/AR_EXTRAS) gets one scrubbed working-memory line per call, keyed by
+// this process's SESSION_ID. See lib/ambient-capture.ts's doc comment for
+// the full design rationale.
+installAmbientCapture(server);
 
 // ── Default surface: 5 tools (two verbs + three essentials) ─────────────────
 // Automaticity Law: only memory that arrives unasked gets used.
@@ -178,38 +179,32 @@ registerRecall(server);
 registerCheck(server);
 
 // ── Extended tools (--full mode only) ────────────────────────────────────────
-// Use when you need pipeline tracking, skills, dashboards, project boards,
-// context caching, on-demand queries, or first-time bootstrap.
-// Start server with: npx agent-recall-mcp --full
+// P3b purity-census-2026-07-05: stripped to check_action only.
+// skill_write/recall/list, dashboard_export, session_end_reflect, project_board,
+// project_status, bootstrap_scan/import, memory_query, brief all removed from MCP
+// surface (owner-approved 2026-07-05). CLI paths for these remain intact.
 if (fullMode) {
-  // On-demand recall + pre-action safety
-  registerMemoryQuery(server);
   registerCheckAction(server);
+}
 
-  // Behavior policies
-  registerRegisterRule(server);
-
-  // Pipeline tools — project narrative spine
+// ── AR_EXTRAS quarantine zone (purity-census-2026-07-05) ─────────────────────
+// Activate with: AR_EXTRAS=1 npx agent-recall-mcp --full
+// Pipeline: 1 organic use (60d); register_rule: 2 uses; digest: 0 MCP uses.
+// Core logic untouched for reversibility. These tools do NOT appear in the default
+// --full listing — they are invisible until AR_EXTRAS=1 is set.
+if (extrasMode) {
+  // Pipeline tools — project narrative spine (ZOMBIE: last used 2026-05-30)
   registerPipelineOpen(server);
   registerPipelineClose(server);
   registerPipelineList(server);
   registerPipelineCurrent(server);
   registerPipelineShow(server);
 
-  // Procedural memory layer
-  registerSkillWrite(server);
-  registerSkillRecall(server);
-  registerSkillList(server);
+  // Behavior policies (ZOMBIE: 2 organic uses, last 2026-06-03)
+  registerRegisterRule(server);
 
-  // Dashboard + reflection
-  registerDashboardExport(server);
-  registerSessionEndReflect(server);
-
-  // Project status boards, context caching, bootstrap
-  registerProjectBoard(server);
-  registerProjectStatus(server);
+  // Context cache (DEAD via MCP: 0 MCP calls; CLI last used 2026-06-18)
   registerDigest(server);
-  registerBootstrap(server);
 }
 
 registerJournalResources(server);
@@ -219,6 +214,11 @@ registerSessionPrompts(server);
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // C-3 (Train C, 2026-08-12 wave) — best-effort freshness on graceful exit.
+  // Installed once the transport is connected (nothing to distill before
+  // then — no tool calls could have happened yet). See lib/lifecycle-exit.ts.
+  installLifecycleExitHandlers();
 }
 
 main().catch((err) => {

@@ -13,9 +13,11 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { palaceDir, sanitizeSlug } from "../storage/paths.js";
+import { palaceDir } from "../storage/paths.js";
 import { ensureDir } from "../storage/fs-utils.js";
 import { generateFrontmatter } from "./obsidian.js";
+import { sanitizeName } from "../storage/sanitize.js";
+import { scrubForCloud } from "../storage/content-guard.js";
 
 export type PhaseStatus = "active" | "closed" | "abandoned";
 
@@ -67,8 +69,14 @@ export function zeroPad(n: number, width = ORDER_PAD): string {
   return n.toString().padStart(width, "0");
 }
 
+/**
+ * v2 delimiter (naming-v2 spec §3, pipeline row — "delimiter unified to --")
+ * and the shared v2 sanitizer for the phase slug. Readers (listMilestones /
+ * parseMilestoneFile) accept BOTH this and the legacy single-dash form —
+ * existing files are never renamed.
+ */
 export function milestoneFileName(order: number, phase: string): string {
-  return `${zeroPad(order)}-${sanitizeSlug(phase)}.md`;
+  return `${zeroPad(order)}--${sanitizeName(phase, 100)}.md`;
 }
 
 /**
@@ -180,6 +188,9 @@ export function parseMilestoneFile(filePath: string): Milestone {
   const raw = fs.readFileSync(filePath, "utf-8");
   const { meta: rawMeta, body } = parseFrontmatter(raw);
   const base = path.basename(filePath, ".md");
+  // split("-")[0] is the text before the FIRST dash — identical for legacy
+  // "NNNN-slug" and v2 "NNNN--slug" (dual-delimiter support falls out of
+  // this for free; no branch needed).
   const inferredOrder = Number(base.split("-")[0]) || 0;
   return {
     meta: parseMeta(rawMeta, inferredOrder),
@@ -206,6 +217,9 @@ function isWellFormed(m: Milestone): boolean {
 export function listMilestones(project: string): Milestone[] {
   const dir = pipelineDir(project);
   if (!fs.existsSync(dir)) return [];
+  // /^\d+-/ matches BOTH the legacy "NNNN-slug.md" and v2 "NNNN--slug.md"
+  // forms — a leading "-" is all this filter requires, so no dual-delimiter
+  // branch is needed here (verified: "0007--slug" still matches /^\d+-/).
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md") && /^\d+-/.test(f));
   const milestones: Milestone[] = [];
   for (const f of files) {
@@ -311,8 +325,13 @@ export function writeMilestone(
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 
+  // Scrub BEFORE the local write — this is the SOLE write path for pipeline
+  // milestones (pipeline_open/pipeline_close both funnel through here), and
+  // goal/what_was_hard/how_solved/synthesis are all free-text session_end
+  // params. Previously only the caller's post-write syncPipelineFile() re-read
+  // + scrubbed a copy for Supabase; the on-disk milestone file itself stayed raw.
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, renderMilestone(meta, sections), { encoding: "utf-8", mode: 0o600 });
+  fs.writeFileSync(tmp, scrubForCloud(renderMilestone(meta, sections)), { encoding: "utf-8", mode: 0o600 });
   fs.renameSync(tmp, filePath); // atomic on same filesystem
   return filePath;
 }

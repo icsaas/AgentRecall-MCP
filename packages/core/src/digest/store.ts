@@ -13,6 +13,7 @@ import { ensureDir, readJsonSafe, writeJsonAtomic } from "../storage/fs-utils.js
 import { withLock } from "../storage/filelock.js";
 import { extractKeywords } from "../helpers/auto-name.js";
 import { syncToSupabase } from "../supabase/sync.js";
+import { scrubForCloud } from "../storage/content-guard.js";
 import {
   type DigestEntry,
   type DigestIndex,
@@ -124,11 +125,15 @@ export function createDigest(input: DigestStoreInput): DigestStoreResult {
       pruneOne(dir, index);
     }
 
-    // Write content file first — orphaned .md is harmless, dangling index entry is not
+    // Write content file first — orphaned .md is harmless, dangling index entry is not.
+    // Scrub BEFORE the local write (previously only the Supabase-sync copy below
+    // was scrubbed, leaving the on-disk digest — read back verbatim by readDigest()
+    // — carrying raw secrets/injection payloads).
     const digestFilePath = contentPath(dir, id);
-    fs.writeFileSync(digestFilePath, input.content, "utf-8");
-    // Async sync to Supabase (non-blocking)
-    syncToSupabase(digestFilePath, input.content, project, "digest");
+    const scrubbedContent = scrubForCloud(input.content);
+    fs.writeFileSync(digestFilePath, scrubbedContent, "utf-8");
+    // Async sync to Supabase (non-blocking) — already scrubbed above.
+    syncToSupabase(digestFilePath, scrubbedContent, project, "digest");
     index.entries.push(entry);
     writeIndex(dir, index);
 
@@ -255,7 +260,7 @@ export function pruneStale(project: string, olderThanDays: number = 30, global?:
     const keep: DigestEntry[] = [];
 
     for (const entry of index.entries) {
-      if (entry.stale && new Date(entry.updated).getTime() < cutoff) {
+      if (entry.stale && new Date(entry.updated).getTime() <= cutoff) {
         const cp = contentPath(dir, entry.id);
         if (fs.existsSync(cp)) fs.unlinkSync(cp);
         pruned++;
@@ -310,11 +315,13 @@ function refreshDigestInternal(
   existing.ttl_hours = callerTtl;
   existing.expires = computeExpiry(callerTtl);
 
-  // Write content first — safer ordering
+  // Write content first — safer ordering. Scrub BEFORE the local write — same
+  // reasoning as createDigest above.
   const refreshedFilePath = contentPath(dir, existing.id);
-  fs.writeFileSync(refreshedFilePath, newContent, "utf-8");
-  // Async sync to Supabase (non-blocking)
-  syncToSupabase(refreshedFilePath, newContent, existing.project, "digest");
+  const scrubbedContent = scrubForCloud(newContent);
+  fs.writeFileSync(refreshedFilePath, scrubbedContent, "utf-8");
+  // Async sync to Supabase (non-blocking) — already scrubbed above.
+  syncToSupabase(refreshedFilePath, scrubbedContent, existing.project, "digest");
   writeIndex(dir, index);
 
   return {

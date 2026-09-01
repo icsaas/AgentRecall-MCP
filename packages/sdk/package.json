@@ -1,6 +1,6 @@
 {
   "name": "agent-recall-sdk",
-  "version": "3.4.23",
+  "version": "3.4.47",
   "description": "SDK for AgentRecall \u2014 persistent, compounding memory for AI agents",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "agent-recall-core": "3.4.23"
+    "agent-recall-core": "3.4.47"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
@@ -30,9 +30,24 @@
     "ai-memory",
     "agent-recall",
     "memory-palace",
+    "agent-memory",
+    "mcp",
+    "mcp-server",
+    "persistent-memory",
+    "correction-tracking",
+    "claude-code",
+    "claude-mcp",
+    "agent-learning",
+    "session-memory",
+    "compounding-memory",
     "langchain",
-    "crewai",
-    "agent-memory"
+    "crewai"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Goldentrii/AgentRecall-X.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/Goldentrii/AgentRecall-X#readme"
 }

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { resolveProject } from "../storage/project.js";
 import { palaceDir, sanitizeSlug } from "../storage/paths.js";
 import { ensureDir } from "../storage/fs-utils.js";
-import { ensurePalaceInitialized, createRoom, roomExists, updateRoomMeta, recordAccess } from "../palace/rooms.js";
+import { ensurePalaceInitialized, createRoom, roomExists, updateRoomMeta, recordAccess, regenerateRoomsIndex } from "../palace/rooms.js";
 import { fanOut } from "../palace/fan-out.js";
 import { updatePalaceIndex } from "../palace/index-manager.js";
 import { generateFrontmatter } from "../palace/obsidian.js";
@@ -11,6 +11,7 @@ import type { Importance } from "../types.js";
 import { appendToLog } from "../palace/log.js";
 import { generateSlug } from "../helpers/auto-name.js";
 import { syncToSupabase } from "../supabase/sync.js";
+import { scrubForCloud } from "../storage/content-guard.js";
 
 export interface PalaceWriteInput {
   room: string;
@@ -44,6 +45,11 @@ function stripFrontmatterFromContent(rawContent: string): string {
 }
 
 export async function palaceWrite(input: PalaceWriteInput): Promise<PalaceWriteResult> {
+  if (!input.room || !input.room.trim()) {
+    throw new Error(
+      `palace_write: 'room' is required and cannot be empty. Pass a room slug like 'goals' or 'architecture'. agent_instruction: retry with a concrete room name.`
+    );
+  }
   const slug = await resolveProject(input.project);
   const importance: Importance = input.importance ?? "medium";
   const content = stripFrontmatterFromContent(input.content);
@@ -76,9 +82,13 @@ export async function palaceWrite(input: PalaceWriteInput): Promise<PalaceWriteR
 
   const fileExistedBefore = fs.existsSync(targetFile);
 
+  // Scrub BEFORE the local write (content-guard.ts: this used to run only on the
+  // cloud-sync copy via the re-read further below, leaving the on-disk palace file
+  // — read verbatim by recall/session_start/handoff — carrying raw secrets/
+  // injection payloads even for opted-out-of-cloud users).
   if (targetTopic === "README") {
     let existing = fileExistedBefore ? fs.readFileSync(targetFile, "utf-8") : "";
-    const entry = `\n### ${timestamp.slice(0, 10)} — ${importance}\n\n${content}\n`;
+    const entry = scrubForCloud(`\n### ${timestamp.slice(0, 10)} — ${importance}\n\n${content}\n`);
 
     if (existing.includes("## Memories")) {
       const idx = existing.indexOf("## Memories");
@@ -92,7 +102,7 @@ export async function palaceWrite(input: PalaceWriteInput): Promise<PalaceWriteR
   } else {
     if (fileExistedBefore) {
       const existing = fs.readFileSync(targetFile, "utf-8");
-      const entry = `\n### ${timestamp.slice(0, 10)} — ${importance}\n\n${content}\n`;
+      const entry = scrubForCloud(`\n### ${timestamp.slice(0, 10)} — ${importance}\n\n${content}\n`);
       fs.writeFileSync(targetFile, existing + entry, "utf-8");
     } else {
       const fm = generateFrontmatter({ room: input.room, topic: targetTopic, created: timestamp, importance, tags: input.tags ?? [] });
@@ -100,28 +110,39 @@ export async function palaceWrite(input: PalaceWriteInput): Promise<PalaceWriteR
       // append path + README path). Without this, countRoomEntries() — which counts
       // `### ` headers — would report 0 for a brand-new topic file, sorting a room
       // with real content as "empty" and zeroing its salience.
-      const entry = `### ${timestamp.slice(0, 10)} — ${importance}\n\n${content}\n`;
+      const entry = scrubForCloud(`### ${timestamp.slice(0, 10)} — ${importance}\n\n${content}\n`);
       fs.writeFileSync(targetFile, `${fm}# ${input.room} / ${targetTopic}\n\n${entry}`, "utf-8");
     }
   }
 
-  updateRoomMeta(slug, input.room, { updated: timestamp });
+  // Use the sanitized slug for all routing + the returned result so it matches what
+  // createRoom persisted to _room.json (meta.slug = sanitizeSlug(slug)). Passing the
+  // raw input.room here re-sanitizes downstream (no-op for clean slugs) but would
+  // surface an inconsistent slug to the agent for slugs containing rewritten chars.
+  updateRoomMeta(slug, safeRoom, { updated: timestamp });
   // Propagate the real importance of this write into the salience formula so
   // --importance high measurably raises the room's salience (not always medium).
-  recordAccess(slug, input.room, importance);
+  recordAccess(slug, safeRoom, importance);
 
-  // Async sync to Supabase (non-blocking)
+  // Async sync to Supabase (non-blocking). The file on disk is already scrubbed
+  // (above), so re-reading it back gives the sync call the SAME scrubbed bytes —
+  // no second scrub pass needed, and local/cloud copies stay byte-identical.
   const writtenContent = fs.readFileSync(targetFile, "utf-8");
-  syncToSupabase(targetFile, writtenContent, slug, "palace", input.room);
+  syncToSupabase(targetFile, writtenContent, slug, "palace", safeRoom);
 
-  const fanOutResult = fanOut(slug, input.room, targetTopic, content, input.connections ?? [], importance);
+  const fanOutResult = fanOut(slug, safeRoom, targetTopic, content, input.connections ?? [], importance);
   updatePalaceIndex(slug);
 
-  appendToLog(slug, "palace_write", { room: input.room, topic: targetTopic, importance, fan_out_rooms: fanOutResult.updatedRooms });
+  // W2-3 (naming-v2 spec §4): regenerate palace/rooms/_index.md — no lock is
+  // held at this point (updateRoomMeta/recordAccess above already acquired
+  // and released their own locks), so this runs outside any critical section.
+  regenerateRoomsIndex(slug);
+
+  appendToLog(slug, "palace_write", { room: safeRoom, topic: targetTopic, importance, fan_out_rooms: fanOutResult.updatedRooms });
 
   return {
     success: true,
-    room: input.room,
+    room: safeRoom,
     topic: targetTopic,
     project: slug,
     importance,

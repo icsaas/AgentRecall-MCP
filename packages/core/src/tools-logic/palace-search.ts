@@ -1,9 +1,8 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { resolveProject } from "../storage/project.js";
-import { palaceDir } from "../storage/paths.js";
 import { ensurePalaceInitialized, listRooms, recordAccess } from "../palace/rooms.js";
 import { stem, expandQuery } from "../helpers/normalize.js";
+import { tokenizeWords } from "../helpers/tokenize.js";
+import { readTierCandidates, type MemoryCandidate } from "../retrieval/candidates.js";
 
 export interface PalaceSearchInput {
   query: string;
@@ -55,13 +54,16 @@ export async function palaceSearch(input: PalaceSearchInput): Promise<PalaceSear
   ensurePalaceInitialized(slug);
 
   const rooms = listRooms(slug);
-  const pd = palaceDir(slug);
   // v3.3.14: use keyword overlap instead of exact substring match.
   // Old approach: lines[i].toLowerCase().includes(fullQuery) required the entire
   // query to appear as one continuous substring — too strict, missed relevant entries.
   // New approach: count matched keywords, compute overlap ratio for scoring.
   // v3.3.21: use stemming + synonym expansion for query words
-  const rawQueryWords = input.query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  // P0-b (2026-08-18): CJK-aware via the shared tokenizer — an unspaced
+  // Chinese/Japanese query used to collapse into one giant token that had to
+  // match byte-for-byte (2026-08-18 L1 eval: CJK hit@5 = 0/6). Default
+  // minLength=3 reproduces the original `length > 2` floor for ASCII.
+  const rawQueryWords = tokenizeWords(input.query);
 
   // Fix RC1: project-scope keyword inflation.
   // When searching within a project, every file contains the project name —
@@ -88,14 +90,35 @@ export async function palaceSearch(input: PalaceSearchInput): Promise<PalaceSear
 
   const targetRooms = input.room ? rooms.filter((r) => r.slug === input.room) : rooms;
 
-  for (const roomMeta of targetRooms) {
-    const roomPath = path.join(pd, "rooms", roomMeta.slug);
-    if (!fs.existsSync(roomPath)) continue;
+  // Wave 3a (P0 palace-room KNOWN-GAP closure, 2026-08-30): fetch every
+  // room's candidate files ONCE through the shared, trust-safe FETCH stage
+  // (readTierCandidates) instead of this surface's own raw
+  // fs.readdirSync+readFileSync glob. readTierCandidates drops
+  // rescue-tagged content before returning (safe by default), so a
+  // hijacked working-memory-rescue card can no longer impersonate a
+  // genuine room entry in search results. This swap ONLY changes WHERE
+  // `content`/`file` come from — 100% of the scoring pipeline below
+  // (tokenize/stem/expandQuery, project-variant stripping, tag bonus, IDF,
+  // per-line reporting) is untouched, and result ordering is preserved:
+  // readTierCandidates enumerates rooms via the SAME listRooms() order and
+  // each room's files via the SAME fs.readdirSync() call the old code used,
+  // so grouping the flattened output back by `room` (below) reproduces the
+  // exact per-room, per-file iteration order the old raw scan had.
+  const candidates = readTierCandidates("palace-room", slug, { room: input.room });
+  const candidatesByRoom = new Map<string, MemoryCandidate[]>();
+  for (const c of candidates) {
+    if (!c.room) continue;
+    const list = candidatesByRoom.get(c.room);
+    if (list) list.push(c);
+    else candidatesByRoom.set(c.room, [c]);
+  }
 
-    const files = fs.readdirSync(roomPath).filter((f) => f.endsWith(".md"));
-    for (const file of files) {
-      const filePath = path.join(roomPath, file);
-      const content = fs.readFileSync(filePath, "utf-8");
+  for (const roomMeta of targetRooms) {
+    const roomCandidates = candidatesByRoom.get(roomMeta.slug) ?? [];
+
+    for (const candidate of roomCandidates) {
+      const file = candidate.file;
+      const content = candidate.content;
       const lines = content.split("\n");
 
       // Parse YAML frontmatter tags for bonus scoring
@@ -116,8 +139,11 @@ export async function palaceSearch(input: PalaceSearchInput): Promise<PalaceSear
         // Skip pure markdown headings (## Memories, # Room, etc.) — structural, not content
         if (/^#{1,6}\s/.test(lines[i])) continue;
 
-        // Stem each line word for matching
-        const lineWords = lineLower.split(/\s+/).filter(w => w.length > 2).map(w => stem(w));
+        // Stem each line word for matching. CJK-aware (P0-b): tokenizeWords
+        // segments Han-script runs into real words instead of treating a
+        // whole unspaced Chinese line as one token; stem() is a no-op on
+        // CJK tokens (ASCII suffix rules never match Han characters).
+        const lineWords = tokenizeWords(lineLower).map(w => stem(w));
         const lineWordSet = new Set(lineWords);
 
         // Count how many query keywords match (stemmed OR substring)

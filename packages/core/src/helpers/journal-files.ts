@@ -4,16 +4,19 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
 import { journalDir, journalDirs } from "../storage/paths.js";
 import { ensureDir } from "../storage/fs-utils.js";
+import { isJournalFile, isRescueSourcedContent } from "./journal-filter.js";
+import { parseJournalFileName } from "./journal-name-parser.js";
 import type { JournalEntry } from "../types.js";
 
 /**
  * List all .md journal files across all directories for a project.
  * Returns sorted array with most recent first.
  */
-export function listJournalFiles(project: string): JournalEntry[] {
-  const dirs = journalDirs(project);
+export function listJournalFiles(project: string, includeArchive = false): JournalEntry[] {
+  const dirs = journalDirs(project, includeArchive);
   const entries: JournalEntry[] = [];
   const seen = new Set<string>();
 
@@ -159,14 +162,42 @@ export function readRecentCaptures(project: string, limit = 5): CaptureLogEntry[
   return entries;
 }
 
+/** Options for readJournalFile. */
+export interface ReadJournalFileOpts {
+  /**
+   * Identity-trust (P0 trust-class closure, 2026-08-30, wave/pipe-p0-trustclass):
+   * when false (default), any candidate file whose content carries the
+   * `source: working-memory-rescue` tag is skipped — this function is the
+   * SHARED choke point every generic content-reading caller (journalRead's
+   * date branch, drill-down.ts's fetchVerbatim journal branch, the MCP
+   * journal-resources.ts "Journal Entry" resource, the CLI's own recent-
+   * brief render) funnels through, mirroring readTierCandidates' own
+   * safe-by-default posture. Set true only when the caller has its own
+   * reason to see rescue-tagged content (no current caller does).
+   */
+  includeUntrusted?: boolean;
+}
+
 /**
  * Read a journal file. Checks primary dir first, then legacy.
+ *
+ * Safe by default (see ReadJournalFileOpts.includeUntrusted's own doc
+ * comment): a rescue-tagged candidate is skipped at EVERY shape below
+ * (exact/smart-named/session-scoped/capture-log), falling through to the
+ * next shape or directory rather than surfacing hijacked content. If ALL
+ * candidates for this date are rescue-tagged, this returns null — the same
+ * "nothing genuine found" contract as a missing file, never a fabricated
+ * substitute.
  */
-export function readJournalFile(project: string, date: string): string | null {
+export function readJournalFile(project: string, date: string, opts: ReadJournalFileOpts = {}): string | null {
   // Validate date format before use in path.join or string matching
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
 
-  const dirs = journalDirs(project);
+  const includeUntrusted = opts.includeUntrusted ?? false;
+  const keep = (content: string): boolean => includeUntrusted || !isRescueSourcedContent(content);
+
+  // Include archive for backlink resolution — archived entries must be reachable
+  const dirs = journalDirs(project, true);
   const primaryDir = journalDir(project);
   const allDirs = [primaryDir, ...dirs.filter((d) => d !== primaryDir)];
 
@@ -177,15 +208,21 @@ export function readJournalFile(project: string, date: string): string | null {
 
     // Exact legacy match: YYYY-MM-DD.md
     const exact = path.join(dir, `${date}.md`);
-    if (fs.existsSync(exact)) return fs.readFileSync(exact, "utf-8");
+    if (fs.existsSync(exact)) {
+      const content = fs.readFileSync(exact, "utf-8");
+      if (keep(content)) return content;
+      // rescue-tagged exact-date file — skip it, fall through to the other
+      // shapes below (still within this same directory) rather than a bare
+      // early return.
+    }
 
     // Smart-named files: YYYY-MM-DD--{saveType}--{lines}L--{slug}.md
     const smartFiles = files.filter(f =>
       f.startsWith(`${date}--`) && f.endsWith(".md") && !f.includes("--capture--")
     );
     if (smartFiles.length > 0) {
-      const parts = smartFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8"));
-      return parts.join("\n\n---\n\n");
+      const parts = smartFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8")).filter(keep);
+      if (parts.length > 0) return parts.join("\n\n---\n\n");
     }
 
     // Legacy session-scoped: YYYY-MM-DD-{sessionId}.md
@@ -194,8 +231,8 @@ export function readJournalFile(project: string, date: string): string | null {
       f.startsWith(date + "-") && /^[a-f0-9]{6}\.md$/.test(f.slice(date.length + 1))
     );
     if (sessionFiles.length > 0) {
-      const parts = sessionFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8"));
-      return parts.join("\n\n---\n\n");
+      const parts = sessionFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8")).filter(keep);
+      if (parts.length > 0) return parts.join("\n\n---\n\n");
     }
 
     // Capture/log files (both formats)
@@ -204,8 +241,8 @@ export function readJournalFile(project: string, date: string): string | null {
       (f.includes("-log.md") || f.includes("--capture--"))
     );
     if (captureFiles.length > 0) {
-      const parts = captureFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8"));
-      return parts.join("\n\n---\n\n");
+      const parts = captureFiles.map(f => fs.readFileSync(path.join(dir, f), "utf-8")).filter(keep);
+      if (parts.length > 0) return parts.join("\n\n---\n\n");
     }
   }
   return null;
@@ -241,65 +278,216 @@ export function countLogEntries(logPath: string): number {
   return matches ? matches.length : 0;
 }
 
+/** One row of computed journal-index data, shared by index.md and index.jsonl. */
+interface JournalIndexRow {
+  date: string;
+  file: string;
+  title: string;
+  summary: string;
+  momentum: string;
+}
+
 /**
- * Update the index.md for a project.
+ * Read a journal entry's file content and derive its index row. This is the
+ * O(file size) step the incremental cache in `updateIndex` exists to avoid
+ * paying for every file on every call — only entries that are new or changed
+ * since the last index write go through this function.
+ */
+function computeIndexRow(entry: JournalEntry): JournalIndexRow {
+  const content = fs.readFileSync(path.join(entry.dir, entry.file), "utf-8");
+  const title = extractTitle(content);
+  const momentum = extractMomentum(content);
+  // Extract first non-heading, non-empty line as summary
+  let summary = "";
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith("#") && !trimmed.startsWith("---") && !trimmed.startsWith(">")) {
+      summary = trimmed.slice(0, 120);
+      break;
+    }
+  }
+  return { date: entry.date, file: entry.file, title, summary, momentum };
+}
+
+/**
+ * Parse the EXISTING index.jsonl (if any) into a Map<filename, JournalIndexRow>
+ * so `updateIndex` can reuse previously-computed rows for files that haven't
+ * changed since the last write, instead of re-reading their content.
+ *
+ * Returns an empty map on ANY failure — missing file, corrupt/partial line,
+ * or a pre-incremental index.jsonl written before rows carried a `file` key.
+ * A cache miss just means "read this file fresh", so this always self-heals
+ * into a full rebuild rather than ever throwing into `updateIndex`'s caller.
+ */
+function readIndexJsonlCache(jsonlPath: string): Map<string, JournalIndexRow> {
+  const cache = new Map<string, JournalIndexRow>();
+  try {
+    if (!fs.existsSync(jsonlPath)) return cache;
+    const raw = fs.readFileSync(jsonlPath, "utf-8");
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as Partial<JournalIndexRow>;
+        if (parsed && typeof parsed.file === "string") {
+          cache.set(parsed.file, {
+            date: String(parsed.date ?? ""),
+            file: parsed.file,
+            title: String(parsed.title ?? ""),
+            summary: String(parsed.summary ?? ""),
+            momentum: String(parsed.momentum ?? ""),
+          });
+        }
+      } catch {
+        // one bad line never invalidates the rest of the cache
+      }
+    }
+  } catch {
+    // unreadable index.jsonl — fall back to an empty cache (full rebuild)
+  }
+  return cache;
+}
+
+/**
+ * Update the index.md (+ index.jsonl) for a project.
+ *
+ * PERF (2026-07-27, consumer audit in the accompanying commit): this used to
+ * re-read EVERY journal file's full content on EVERY call from all four
+ * journal write paths (journal_write/rollup/merge/archive) — measured
+ * 2846ms at 50k files — and paid that cost TWICE per call, since index.md's
+ * title/momentum and index.jsonl's title/summary/momentum were computed by
+ * two independent full passes over the same files.
+ *
+ * index.md is still a real consumer's source of truth — the MCP resource
+ * `agent-recall://{project}/index` (packages/mcp-server/src/resources/
+ * journal-resources.ts) reads it verbatim over `resources/read` — so this
+ * cannot simply stop being maintained on write (unlike a purely-internal
+ * cache). Instead it is now incremental: a file's content is only re-read
+ * when the file is NEWER than the index's own last write (mtimeMs); rows for
+ * unchanged files are reused from the previous index.jsonl, which now also
+ * carries the row's `file` name so lookups are by identity rather than
+ * fragile array position. index.md's table format is unchanged; index.jsonl
+ * gains one additive `file` field (nothing in-repo reads index.jsonl today —
+ * see audit — so this is a safe, backward-compatible addition).
+ *
+ * Degrades gracefully to a full rebuild — first run, a hand-deleted
+ * index.jsonl, or a pre-incremental jsonl with no `file` key — after which
+ * subsequent calls become fast again. Known limitation: on filesystems with
+ * coarser-than-millisecond mtime resolution, a file rewritten within the
+ * same tick as the previous index write could be missed until the next
+ * write touches it again; journal writes are human/agent-paced (seconds
+ * apart at minimum) so this is an accepted, low-probability tradeoff of
+ * mtime-based invalidation, not a correctness guarantee.
  */
 export function updateIndex(project: string): void {
   const dir = journalDir(project);
   ensureDir(dir);
   const indexPath = path.join(dir, "index.md");
+  const jsonlPath = path.join(dir, "index.jsonl");
 
   const entries = listJournalFiles(project);
+
+  // Threshold = the index's own last-write time. Missing index ⇒ threshold 0
+  // ⇒ every file counts as "newer" ⇒ full rebuild (matches legacy behavior
+  // on a first run).
+  let indexMtimeMs = 0;
+  try {
+    indexMtimeMs = fs.statSync(indexPath).mtimeMs;
+  } catch {
+    indexMtimeMs = 0;
+  }
+
+  const previous = readIndexJsonlCache(jsonlPath);
+  const rows: JournalIndexRow[] = [];
+  for (const entry of entries) {
+    let fileMtimeMs = Infinity; // unreadable stat ⇒ treat as changed, be safe
+    try {
+      fileMtimeMs = fs.statSync(path.join(entry.dir, entry.file)).mtimeMs;
+    } catch {
+      fileMtimeMs = Infinity;
+    }
+
+    const cached = fileMtimeMs <= indexMtimeMs ? previous.get(entry.file) : undefined;
+    // Re-anchor date/file to the CURRENT listing even on a cache hit — only
+    // the expensive derived fields (title/summary/momentum) come from cache.
+    rows.push(
+      cached
+        ? { date: entry.date, file: entry.file, title: cached.title, summary: cached.summary, momentum: cached.momentum }
+        : computeIndexRow(entry)
+    );
+  }
 
   let index = `# ${project} — Journal Index\n\n`;
   index += `> Auto-generated. ${entries.length} entries.\n\n`;
   index += `| Date | Title | Momentum |\n`;
   index += `|------|-------|----------|\n`;
-
-  for (const entry of entries) {
-    const content = fs.readFileSync(
-      path.join(entry.dir, entry.file),
-      "utf-8"
-    );
-    const title = extractTitle(content);
-    const momentum = extractMomentum(content);
-    index += `| ${entry.date} | ${title} | ${momentum} |\n`;
+  for (const row of rows) {
+    index += `| ${row.date} | ${row.title} | ${row.momentum} |\n`;
   }
-
   fs.writeFileSync(indexPath, index, "utf-8");
 
-  // Also write index.jsonl — one JSON object per entry for fast machine scanning
-  updateJsonlIndex(project, entries);
+  // index.jsonl — one JSON object per entry for fast machine scanning, and
+  // the incremental cache source for the NEXT call to updateIndex.
+  const lines = rows.map((row) => JSON.stringify(row));
+  fs.writeFileSync(jsonlPath, lines.join("\n") + "\n", "utf-8");
 }
 
 /**
- * Write index.jsonl alongside index.md.
- * Agents can scan this in ~100 tokens to find the right entry to read,
- * instead of parsing the markdown table.
+ * W2-2 (naming-v2 spec §4) — regenerate journal/_index.md, the materialized
+ * machine fast-path over the journal store: the last 10 entries, newest
+ * first, as `| date | saveType | sig | theme | slug |`. Rows are derived by
+ * PARSING existing filenames with parseJournalFileName — file CONTENTS are
+ * never opened, so this stays cheap even for a large journal directory.
+ *
+ * `isJournalFile` filters out capture logs, weekly rollups, `index.md`
+ * (the pre-existing Obsidian-style index) — and, critically, `_index.md`
+ * itself (underscore-prefixed files), so regenerating never counts its own
+ * previous output as an 11th entry.
+ *
+ * ATOMIC (write-temp + rename). NEVER throws: regeneration failure must
+ * never fail the journal write that triggered it — errors are logged to
+ * stderr as a one-liner and swallowed.
  */
-function updateJsonlIndex(project: string, entries: JournalEntry[]): void {
-  const dir = journalDir(project);
-  const jsonlPath = path.join(dir, "index.jsonl");
+export function regenerateJournalIndex(project: string): void {
+  try {
+    const dir = journalDir(project);
+    ensureDir(dir);
+    const files = fs.readdirSync(dir)
+      .filter(isJournalFile)
+      .sort()
+      .reverse()
+      .slice(0, 10);
 
-  const lines: string[] = [];
-  for (const entry of entries) {
-    const content = fs.readFileSync(
-      path.join(entry.dir, entry.file),
-      "utf-8"
-    );
-    const title = extractTitle(content);
-    const momentum = extractMomentum(content);
-    // Extract first non-heading, non-empty line as summary
-    let summary = "";
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith("#") && !trimmed.startsWith("---") && !trimmed.startsWith(">")) {
-        summary = trimmed.slice(0, 120);
-        break;
-      }
+    const lines: string[] = [];
+    lines.push("# Journal Index — regenerated on write; do not edit");
+    lines.push("");
+    lines.push(`Generated: ${new Date().toISOString()}`);
+    lines.push(`${files.length} of last 10 entries shown, newest first.`);
+    lines.push("");
+    lines.push("| date | saveType | sig | theme | slug |");
+    lines.push("|---|---|---|---|---|");
+    for (const f of files) {
+      const parsed = parseJournalFileName(f);
+      const date = parsed.date || "—";
+      const saveType = parsed.saveType ?? "—";
+      const sig = parsed.sig ?? "—";
+      const theme = parsed.theme ?? "—";
+      const slug = parsed.slug ?? "—";
+      lines.push(`| ${date} | ${saveType} | ${sig} | ${theme} | ${slug} |`);
     }
-    lines.push(JSON.stringify({ date: entry.date, title, summary, momentum }));
-  }
 
-  fs.writeFileSync(jsonlPath, lines.join("\n") + "\n", "utf-8");
+    const content = lines.join("\n") + "\n";
+    const indexPath = path.join(dir, "_index.md");
+    const tmp = `${indexPath}.tmp-${crypto.randomBytes(4).toString("hex")}`;
+    fs.writeFileSync(tmp, content, "utf-8");
+    fs.renameSync(tmp, indexPath);
+  } catch (err) {
+    try {
+      process.stderr.write(
+        `[agent-recall] journal index regeneration failed for "${project}": ` +
+        `${err instanceof Error ? err.message : String(err)}\n`
+      );
+    } catch {
+      /* a diagnostic write must never throw into the caller */
+    }
+  }
 }

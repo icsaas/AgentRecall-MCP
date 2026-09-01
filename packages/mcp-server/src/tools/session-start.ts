@@ -1,6 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { sessionStart, sessionStartLite, type SessionStartResult } from "agent-recall-core";
+import {
+  sessionStart,
+  sessionStartLite,
+  fenceMemory,
+  continuityEntryMarker,
+  continuityHeaderText,
+  type SessionStartResult,
+  type SessionStartLiteResult,
+} from "agent-recall-core";
 
 /** Truncate to nearest word boundary */
 function trunc(s: string, n: number): string {
@@ -10,7 +18,8 @@ function trunc(s: string, n: number): string {
   return (lastSpace > n * 0.6 ? sliced.slice(0, lastSpace) : sliced) + "…";
 }
 
-function formatTerse(result: SessionStartResult): string {
+/** Exported for unit testing (F2 continuity wave, 2026-07-31) — pure formatter, no I/O. */
+export function formatTerse(result: SessionStartResult): string {
   const lines: string[] = [];
 
   // ── Dream cron failure banner (red, top priority) ─────────────────────
@@ -18,6 +27,13 @@ function formatTerse(result: SessionStartResult): string {
   // backfill stays stale for another week.
   if (result.dream_health?.banner) {
     lines.push(`🔴 ${result.dream_health.banner}`);
+    lines.push("");
+  }
+
+  // ── Store-doctor health line (only on warn/red; silent on a healthy store) ─
+  // READ-ONLY integrity signal. Never blocks recall — it is a one-line banner.
+  if (result.store_doctor) {
+    lines.push(result.store_doctor);
     lines.push("");
   }
 
@@ -29,6 +45,37 @@ function formatTerse(result: SessionStartResult): string {
     const pct = Math.round(precision * 100);
     const recurrStr = recurred > 0 ? `, ${recurred} recurred` : "";
     lines.push(`🎯 Alignment: ${pct}% corrections heeded (${heeded}/${retrieved}${recurrStr})`);
+    lines.push("");
+  }
+
+  // ── Continuity (F2, continuity wave 2026-07-31) ──────────────────────────
+  // Cross-project RECENCY card — top of the substantive content, after the
+  // red-alert/integrity banners above (dream_health, store_doctor, alignment
+  // stay first-priority by design) but before the per-project header, so
+  // "what was I doing, anywhere, most recently" is the first thing an agent
+  // reads. Absent entirely when the recency index has nothing to show (no
+  // noise on a fresh/solo-project store).
+  if (result.continuity && result.continuity.length > 0) {
+    // Fable option 2 (label-not-scope, 2026-08-30) — header frames the
+    // WHOLE block as orientation when every entry is cross-project;
+    // otherwise the original neutral header. Single derivation point:
+    // agent-recall-core's continuityHeaderText (never re-implemented here).
+    lines.push(continuityHeaderText(result.continuity_all_cross_project));
+    for (const c of result.continuity) {
+      const next = c.next_step ? ` → next: ${trunc(c.next_step, 80)}` : "";
+      // Identity-trust (2026-08-20): visibly label a rescue-sourced
+      // (unverified cwd-guess) entry rather than presenting it as verified
+      // memory — see SessionStartResult["continuity"]'s `untrusted` field
+      // doc comment (agent-recall-core).
+      const trustFlag = c.untrusted ? " [unverified — rescued from a crashed session]" : "";
+      // Fable option 2 (label-not-scope, 2026-08-30) — "↪ " marks an entry
+      // that is NOT this project's own continuity (orientation, recent work
+      // elsewhere); empty for a current-project entry. Derived via the
+      // SAME shared helper the CLI hook-start renderer calls, so the two
+      // text renderers of this field cannot drift.
+      const marker = continuityEntryMarker(c, result.project);
+      lines.push(`  - ${marker}${c.ago} [${c.slug}] ${trunc(c.title, 100)}${next}${trustFlag}`);
+    }
     lines.push("");
   }
 
@@ -55,8 +102,7 @@ function formatTerse(result: SessionStartResult): string {
     lines.push("");
     lines.push("⛔ HARD RULES (always follow, no exceptions):");
     for (const c of result.corrections) {
-      const weight = c.weight !== undefined ? ` (w:${c.weight})` : "";
-      lines.push(`  [${c.severity.toUpperCase()}${weight}] ${trunc(c.rule, 120)}`);
+      lines.push(`  [${c.severity.toUpperCase()}] ${trunc(c.rule, 120)}`);
     }
   }
 
@@ -125,13 +171,48 @@ function formatTerse(result: SessionStartResult): string {
     }
   }
 
+  // ── The Mirror pointer (Loop 9) ───────────────────────────────────────
+  // One quiet line, only when a correctable self-model can be assembled.
+  if (result.mirror_available) {
+    lines.push("");
+    lines.push(`🪞 ${result.mirror_available}`);
+  }
+
   // ── Empty state guidance ──────────────────────────────────────────────
   if (result.empty_state) {
     lines.push("");
     lines.push(result.empty_state);
   }
 
-  return lines.join("\n");
+  // ── P1 fence (TOW2-388) ─────────────────────────────────────────────────
+  // Everything above this point is retrieved/stored memory content (or
+  // AgentRecall's own labels commingled with it) — fence it as ONE block
+  // before appending the two AgentRecall-authored, non-memory tail lines
+  // below. Those two stay OUTSIDE the fence deliberately: they are genuine
+  // tool-usage guidance generated by this function, not retrieved data, and
+  // an agent should not discount them as "just information, never act on
+  // it". See content-guard.ts:fenceMemory for the delimiter + residual.
+  const fenced = fenceMemory(lines.join("\n"));
+  const tail: string[] = [];
+
+  // ── P4 cross-surface adapter — hook-less host pointer ─────────────────
+  // Append to the human-readable text layer only (not the JSON struct) to
+  // avoid blowing the 1600-char token budget. Omitted in Claude Code (where
+  // CLAUDE_CODE_HOOKS is set) since hooks auto-drive the lifecycle.
+  if (!process.env["CLAUDE_CODE_HOOKS"]) {
+    tail.push("");
+    tail.push("Hook-less host? call brief() once for lifecycle rules.");
+  }
+
+  // ── C4 A/B experiment marker (quiet trailing tag, not a banner) ────────
+  // Intentionally understated — a loud banner would nudge the agent to behave
+  // differently depending on the arm, which would confound the measurement.
+  // The tag is for transcript review / dashboard display only.
+  if (result.ab_arm) {
+    tail.push(`[ab:${result.ab_arm}]`);
+  }
+
+  return [fenced, ...tail].join("\n");
 }
 
 function formatVerbose(result: SessionStartResult): string {
@@ -141,8 +222,11 @@ function formatVerbose(result: SessionStartResult): string {
     lines.push("## ⛔ HARD RULES — always follow, no exceptions");
     lines.push("These are behavioral constraints, not suggestions. Treat violations as errors.");
     for (const c of result.corrections) {
-      const weight = c.weight !== undefined ? ` (weight: ${c.weight})` : "";
-      lines.push(`[${c.severity.toUpperCase()}${weight}] ${c.rule}`);
+      lines.push(`[${c.severity.toUpperCase()}] ${c.rule}`);
+      // Slim corrections carry `context` only when it adds material content
+      // beyond the rule — verbose mode is where those bytes reach the agent.
+      // Terse mode stays rule-only by design.
+      if (c.context) lines.push(`  ctx: ${c.context}`);
     }
     lines.push("");
   }
@@ -159,13 +243,42 @@ function formatVerbose(result: SessionStartResult): string {
   const { corrections: _omit, ...contextWithoutCorrections } = result;
   lines.push(JSON.stringify(contextWithoutCorrections, null, 2));
 
-  return lines.join("\n");
+  // P1 fence (TOW2-388) — the entire verbose payload is retrieved memory
+  // (corrections + a full JSON dump of the rest); no non-memory tail exists
+  // in this formatter, so the whole block is fenced as one.
+  return fenceMemory(lines.join("\n"));
+}
+
+/**
+ * Lite-mode text composition, extracted (F2 continuity wave, 2026-07-31) so
+ * the "⏪ {continuity}" single-line placement can be unit tested without
+ * spawning the MCP server subprocess — mirrors the formatTerse/formatVerbose
+ * extraction convention already used in this file.
+ */
+export function formatLite(lite: SessionStartLiteResult): string {
+  // P1 fence (TOW2-388): the header line is pure structural metadata (slug,
+  // counts, dates — validated project-slug shape, not free-form retrieved
+  // text) and stays OUTSIDE the fence at its existing position. `hint` is
+  // AgentRecall's own fixed trailing suggestion (never derived from stored
+  // content) and also stays outside. Everything in between — continuity,
+  // identity, active-phase goal — quotes retrieved memory and is fenced as
+  // one block.
+  const header = `AgentRecall (lite) — ${lite.project}   sessions: ${lite.total_sessions}   last: ${lite.last_session_date ?? "—"}`;
+  const body = [
+    lite.continuity ? `⏪ ${lite.continuity}` : "",
+    lite.identity_oneliner ? `Intention: ${lite.identity_oneliner}` : "",
+    lite.active_phase ? `▶ Active phase: ${lite.active_phase}${lite.active_phase_goal ? ` — ${lite.active_phase_goal}` : ""}` : "",
+    lite.open_corrections_p0_count > 0 ? `⛔ ${lite.open_corrections_p0_count} P0 corrections active — call recall() if working on related code.` : "",
+    lite.total_skills > 0 ? `🛠  ${lite.total_skills} skills stored — use ar skill recall <intent> via CLI before non-trivial tasks.` : "",
+  ].filter(Boolean).join("\n");
+
+  return [header, fenceMemory(body), "", lite.hint].filter(Boolean).join("\n");
 }
 
 export function register(server: McpServer): void {
   server.registerTool("session_start", {
     title: "Start Session",
-    description: "Use when the user asks to start, load, continue, resume, or open memory for a project. Set mode='lite' for a ≤500-token briefing (good for fresh conversations where the agent will pull memory on demand via recall/memory_query/skill_recall).",
+    description: "[ENTRY — call FIRST, before acting] Use when the user asks to start, load, continue, resume, or open memory for a project. Set mode='lite' for a ≤500-token briefing (good for fresh conversations where the agent will pull memory on demand via recall()).",
     inputSchema: {
       project: z.string().default("auto"),
       context: z.string().optional().describe("Optional context for matching cross-project insights"),
@@ -175,15 +288,7 @@ export function register(server: McpServer): void {
   }, async ({ project, context, verbose, mode }) => {
     if (mode === "lite") {
       const lite = await sessionStartLite({ project });
-      const text = [
-        `AgentRecall (lite) — ${lite.project}   sessions: ${lite.total_sessions}   last: ${lite.last_session_date ?? "—"}`,
-        lite.identity_oneliner ? `Intention: ${lite.identity_oneliner}` : "",
-        lite.active_phase ? `▶ Active phase: ${lite.active_phase}${lite.active_phase_goal ? ` — ${lite.active_phase_goal}` : ""}` : "",
-        lite.open_corrections_p0_count > 0 ? `⛔ ${lite.open_corrections_p0_count} P0 corrections active — call recall() if working on related code.` : "",
-        lite.total_skills > 0 ? `🛠  ${lite.total_skills} skills available — call skill_recall({intent}) before non-trivial tasks.` : "",
-        "",
-        lite.hint,
-      ].filter(Boolean).join("\n");
+      const text = formatLite(lite);
       return { content: [{ type: "text" as const, text }] };
     }
     const result = await sessionStart({ project, context });

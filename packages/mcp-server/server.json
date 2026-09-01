@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Goldentrii/agent-recall",
+  "description": "Correction-first agent memory. Precision KPI tracks if agents heed warnings. 5 layers, local-only.",
+  "repository": {
+    "url": "https://github.com/Goldentrii/AgentRecall-X",
+    "source": "github",
+    "subfolder": "packages/mcp-server"
+  },
+  "version": "3.4.47",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agent-recall-mcp",
+      "version": "3.4.47",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

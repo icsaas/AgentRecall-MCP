@@ -16,11 +16,14 @@ import { journalDir, palaceDir } from "../storage/paths.js";
 import { ensureDir, todayISO } from "../storage/fs-utils.js";
 import { listJournalFiles } from "../helpers/journal-files.js";
 import { extractSection } from "../helpers/sections.js";
+import { isRescueSourcedContent } from "../helpers/journal-filter.js";
 import { ensurePalaceInitialized, roomExists, createRoom, touchRoom } from "./rooms.js";
 import { fanOut } from "./fan-out.js";
 import { generateFrontmatter } from "./obsidian.js";
 import { updatePalaceIndex } from "./index-manager.js";
 import { appendToLog } from "./log.js";
+import { markKeystones } from "./keystone.js";
+import { runDecayPass, type DecayReport } from "./decay-pass.js";
 
 export interface ConsolidationResult {
   entriesProcessed: number;
@@ -83,6 +86,14 @@ export function consolidateJournalToPalace(
 
   for (const entry of toProcess) {
     const content = fs.readFileSync(path.join(entry.dir, entry.file), "utf-8");
+    // Identity-trust (CRITICAL-1 followup MEDIUM finding #2, 2026-08-20):
+    // consolidation runs automatically on session_end and fans journal
+    // section content into palace rooms — a rescue card crafted with a
+    // matching section header (## Decisions, ## Next, ...) would otherwise
+    // propagate unverified, unauthenticated-cwd-guess content into the
+    // more-permanent palace tier. Quarantine at the shared choke point
+    // before any section is extracted from this entry.
+    if (isRescueSourcedContent(content)) continue;
     const sourceRef = `[[journal/${entry.date}]]`;
 
     // Extract and route each section type
@@ -176,11 +187,38 @@ export function consolidateJournalToPalace(
   // Update palace index
   updatePalaceIndex(project);
 
+  // Stamp keystone flag on rooms referenced by pipeline milestones.
+  // Runs here (consolidation) not on every write — milestone scan is O(rooms×milestones).
+  // Best-effort: failure does not break consolidation.
+  let keystonesMarked = 0;
+  try {
+    keystonesMarked = markKeystones(project);
+  } catch {
+    // Keystone marking is best-effort — never breaks consolidation
+  }
+
+  // Wave 3: run the FSRS/salience decay pass — flags stale skills/rooms as
+  // archived (non-destructive). Best-effort: never breaks consolidation.
+  let decay: DecayReport | null = null;
+  try {
+    decay = runDecayPass(project, { dryRun: false });
+  } catch {
+    // Decay is best-effort — never breaks consolidation
+  }
+
   // Log the operation
   appendToLog(project, "consolidate", {
     entries_processed: result.entriesProcessed,
     rooms_updated: result.roomsUpdated,
     memories_created: result.memoriesCreated,
+    keystones_marked: keystonesMarked,
+    decay: decay
+      ? {
+          scanned: decay.scanned,
+          archived: decay.archived_candidates.length,
+          skipped: decay.skipped.length,
+        }
+      : null,
   });
 
   return result;

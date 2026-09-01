@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentRecall · Changelog</title>
+<link rel="stylesheet" href="static/fonts.css">
+<style>
+  :root{
+    --bg:#FAF7F0;--surface:#F1ECDD;--surface-2:#E8E1CC;--ink:#2B2520;--ink-soft:#5A4E3F;
+    --ink-faint:#8C7F6B;--rule:#DCD1B5;--rule-soft:#E6DFC8;--accent:#8A6A3F;--accent-soft:#C9A56C;
+    --accent-dim:rgba(138,106,63,.10);--canvas:#1A1814;--canvas-ink:#E8E0D0;--canvas-line:#3A332B;
+    --reflect:#6B5B95;--reflect-bg:rgba(124,107,168,.10);
+    --shadow:0 1px 2px rgba(43,37,32,.05),0 6px 20px rgba(43,37,32,.06);
+    --shadow-lift:0 4px 12px rgba(43,37,32,.10),0 20px 48px rgba(43,37,32,.14);
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#15120E;--surface:#1E1A14;--surface-2:#28231B;--ink:#ECE3D2;--ink-soft:#BBAE97;
+    --ink-faint:#897C68;--rule:#322B21;--rule-soft:#261F18;--accent:#C9A56C;--accent-soft:#E0C088;
+    --accent-dim:rgba(201,165,108,.12);--canvas:#100E0B;--canvas-ink:#E8E0D0;--canvas-line:#2E2820;
+    --reflect:#C9BBE8;--reflect-bg:rgba(156,139,200,.15);
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.35);
+    --shadow-lift:0 4px 12px rgba(0,0,0,.4),0 20px 48px rgba(0,0,0,.5);
+  }}
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--ink);font-family:'Nunito','Segoe UI',system-ui,sans-serif;
+    font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;padding:40px 20px 80px;}
+  .wrap{max-width:880px;margin:0 auto;}
+  h1,h2,h3,.display{font-family:'Baloo 2','Nunito',sans-serif;font-weight:700;}
+  .mono{font-family:'JetBrains Mono',ui-monospace,monospace;}
+  code{font-family:'JetBrains Mono';font-size:.85em;background:var(--surface-2);color:var(--accent);padding:1px 5px;border-radius:5px;}
+
+  /* language toggle */
+  html[data-lang="en"] .zh{display:none;}
+  html[data-lang="zh"] .en{display:none;}
+  .topbar{display:flex;align-items:center;gap:14px;margin-bottom:6px;}
+  .logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(140deg,var(--accent-soft),var(--accent));
+    display:flex;align-items:center;justify-content:center;color:#fff;font-family:'Baloo 2';font-weight:800;font-size:24px;
+    box-shadow:var(--shadow);flex-shrink:0;}
+  h1.title{font-family:'Baloo 2';font-size:30px;color:var(--ink);line-height:1;}
+  .sub{font-size:13px;color:var(--ink-faint);margin-top:2px;}
+  .lang{margin-left:auto;display:flex;border:1px solid var(--rule);border-radius:999px;overflow:hidden;background:var(--surface);box-shadow:var(--shadow);}
+  .lang button{font-family:'Nunito';font-weight:800;font-size:12.5px;color:var(--ink-faint);padding:7px 15px;background:none;border:none;cursor:pointer;transition:all .15s;}
+  .lang button.active{background:var(--accent);color:#fff;}
+  .lede{font-size:14px;color:var(--ink-soft);max-width:640px;margin:18px 0 32px;}
+
+  /* hero */
+  .hero{position:relative;border:1px solid var(--rule);border-radius:20px;overflow:hidden;background:var(--surface);box-shadow:var(--shadow-lift);margin-bottom:40px;}
+  .hero::before{content:'';position:absolute;left:0;top:0;bottom:0;width:6px;background:linear-gradient(180deg,var(--accent-soft),var(--accent));}
+  .hero-head{padding:26px 30px 20px 34px;border-bottom:1px solid var(--rule-soft);}
+  .tagrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+  .vbadge{font-family:'Baloo 2';font-weight:800;font-size:15px;color:#fff;background:linear-gradient(140deg,var(--accent-soft),var(--accent));padding:5px 14px;border-radius:999px;box-shadow:var(--shadow);}
+  .vbadge.sm{font-size:13px;padding:3px 11px;}
+  .major{font-size:10px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);background:var(--accent-dim);padding:5px 11px;border-radius:999px;}
+  .date{font-size:12px;color:var(--ink-faint);font-weight:700;margin-left:auto;}
+  h2.hero-title{font-family:'Baloo 2';font-size:26px;color:var(--ink);line-height:1.12;margin-bottom:8px;}
+  .hero-lede{font-size:15px;color:var(--ink-soft);line-height:1.6;}
+  .grid{padding:22px 30px 8px 34px;display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media (max-width:680px){.grid{grid-template-columns:1fr;padding:20px 20px 6px 24px;}}
+  .card{background:var(--bg);border:1px solid var(--rule-soft);border-radius:14px;padding:15px 16px;}
+  .card.flag{border-color:var(--accent);background:var(--accent-dim);}
+  /* Reflection / learning card — a distinct cool-violet TYPE, set apart from the warm feature/fix cards. */
+  .card.reflect{border-color:var(--reflect);background:var(--reflect-bg);}
+  .card.reflect h3,.card.reflect .ic{color:var(--reflect);}
+  .card.reflect .why b,.card.reflect p b{color:var(--reflect);}
+  .reflect-badge{font-family:'Baloo 2';font-weight:800;font-size:15px;color:#fff;background:linear-gradient(140deg,#9C8BC8,#6B5B95);padding:5px 14px;border-radius:999px;box-shadow:var(--shadow);}
+  .card .ic{font-size:19px;line-height:1;margin-bottom:8px;display:block;}
+  .card h3{font-family:'Baloo 2';font-size:15px;color:var(--ink);margin-bottom:5px;}
+  .card p{font-size:13px;color:var(--ink-soft);line-height:1.55;}
+  .card .why{font-size:12px;color:var(--ink-faint);margin-top:7px;}
+  .card .why b,.card p b{color:var(--accent);}
+  .verify{margin:6px 30px 24px 34px;padding:14px 16px;background:var(--canvas);border-radius:13px;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;}
+  .verify .vlabel{font-size:10px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-soft);}
+  .pill{font-family:'JetBrains Mono';font-size:11px;color:#8FCF82;background:rgba(143,207,130,.08);border:1px solid rgba(143,207,130,.28);border-radius:7px;padding:3px 9px;}
+  .shipped{margin:0 30px 26px 34px;font-size:12.5px;color:var(--ink-soft);line-height:1.6;background:var(--accent-dim);border:1px solid rgba(138,106,63,.25);border-radius:11px;padding:12px 15px;}
+  .shipped b{color:var(--accent);}
+
+  /* prior releases */
+  .sech{font-family:'Baloo 2';font-size:13px;font-weight:800;letter-spacing:.04em;color:var(--ink-faint);text-transform:uppercase;margin:8px 0 18px;}
+  .rel-card{border:1px solid var(--rule);border-radius:16px;background:var(--surface);box-shadow:var(--shadow);padding:20px 24px;margin-bottom:18px;}
+  .rel-head{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:10px;}
+  .rel-title{font-family:'Baloo 2';font-size:18px;color:var(--ink);line-height:1.15;}
+  .rel-sum{font-size:13.5px;color:var(--ink-soft);line-height:1.6;margin-bottom:12px;padding-bottom:12px;border-bottom:1px dashed var(--rule);}
+  ul.pts{list-style:none;display:flex;flex-direction:column;gap:9px;}
+  ul.pts li{position:relative;padding-left:20px;font-size:13px;color:var(--ink-soft);line-height:1.55;}
+  ul.pts li::before{content:'';position:absolute;left:4px;top:8px;width:6px;height:6px;border-radius:50%;background:var(--accent-soft);}
+
+  footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--rule);font-size:12.5px;color:var(--ink-faint);text-align:center;line-height:1.7;}
+  footer a{color:var(--accent);font-weight:700;text-decoration:none;}
+  footer a:hover{text-decoration:underline;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="logo">A</div>
+    <div>
+      <h1 class="title">AgentRecall · Changelog</h1>
+      <div class="sub"><span class="en ">Release history &amp; what changed</span><span class="zh ">版本历史与更新内容</span></div>
+    </div>
+    <div class="lang" id="lang">
+      <button data-set="en" class="active">EN</button>
+      <button data-set="zh">中文</button>
+    </div>
+  </div>
+  <p class="lede"><span class="en ">Correction-first persistent memory for AI agents. Every release is reviewed before it ships. The current major release in full, then the complete trail behind it.</span><span class="zh ">面向 AI agent 的纠正优先持久记忆系统。每个版本发布前都经过评审。下面是当前主版本的完整内容，以及此前每个版本的完整记录。</span></p>
+
+  <a href="memory-to-understanding-plan.html" style="display:flex;align-items:center;gap:14px;text-decoration:none;background:var(--accent-dim);border:1px solid var(--accent-soft);border-radius:14px;padding:16px 20px;margin:18px 0 26px;box-shadow:var(--shadow);transition:transform .12s;">
+    <span style="font-size:26px;flex-shrink:0;">🧭</span>
+    <span style="flex:1;">
+      <span style="display:block;font-family:'Baloo 2','Nunito',sans-serif;font-weight:700;font-size:16px;color:var(--ink);">Roadmap · Memory → Understanding</span>
+      <span class="en " style="display:block;font-size:13px;color:var(--ink-soft);margin-top:2px;">The next-gen design: two-tier memory, async compression, predict-the-correction. 5-wave implementer plan, fact-checked against the live code.</span>
+      <span class="zh " style="display:block;font-size:13px;color:var(--ink-soft);margin-top:2px;">下一代设计：双层记忆、异步压缩、预测纠正。5 波实施计划，逐条对照真实代码核实。</span>
+    </span>
+    <span style="font-size:20px;color:var(--accent);flex-shrink:0;">→</span>
+  </a>
+
+  <!-- v3.4.40 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.40</span>
+        <span class="major"><span class="en ">★ Naming at scale</span><span class="zh ">★ 规模化命名</span></span>
+        <span class="date mono">2026-07-27</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">The store cleans itself up — and tells cold agents what it is</span><span class="zh ">store 学会自我体检——并向陌生 agent 自我介绍</span></h2>
+      <p class="hero-lede"><span class="en ">A 5-seat round table on "what happens at 10,000 files" produced this wave: a classifier fix that ends the biggest filename lie in the corpus, two measured hot-path cuts, a write-once root <code>MANIFEST.md</code> so a bare store directory explains itself to any agent, and <code>ar hygiene</code> — a detection-only trash scan with a baseline, wired for nightly runs.</span><span class="zh ">一场关于"一万个文件时会发生什么"的五席圆桌产出了这一波：终结语料库里最大文件名谎言的分类器修复、两处实测热路径削减、一个 write-once 根 <code>MANIFEST.md</code> 让裸 store 目录能向任何 agent 自我说明，以及 <code>ar hygiene</code>——带基线的检测-only 垃圾扫描，已可挂夜巡。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">🏷️</span>
+        <h3><span class="en ">Classifiers match conditions, not vocabulary</span><span class="zh ">分类器匹配条件，而非词汇</span></h3>
+        <p><span class="en "><code>\bmcp\b</code> saw the hyphen in "novada-mcp" as a word boundary — 90.6% of that project's journal filenames carried a false <code>mcp-unavailable</code> theme. Classifiers now require co-occurring condition signals in one clause: 29/32 false → 1/31, survivor genuine. Two shadow epidemics hiding behind priority order fixed in the same pass.</span><span class="zh "><code>\bmcp\b</code> 把 "novada-mcp" 里的连字符当词边界 —— 该项目 90.6% 的 journal 文件名挂着假 <code>mcp-unavailable</code> 主题。分类器现在要求同一子句内条件信号共现：29/32 误标 → 1/31，幸存者为真。藏在优先级后面的两个影子疫情同批修复。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🧹</span>
+        <h3><span class="en "><code>ar hygiene</code> — the trash scan</span><span class="zh "><code>ar hygiene</code> —— 垃圾扫描</span></h3>
+        <p><span class="en ">8 detection-only checks: junk project dirs, counter-file pileups, theme epidemics, case-fold forks, stale caches, root credential patterns (pattern + line only, never the secret), missing indexes, reserved-word slugs. A baseline means repeat runs report only NEW findings — no alert fatigue. It never deletes anything; every finding carries an <code>agent_instruction</code>.</span><span class="zh ">8 项检测-only 检查：垃圾项目目录、计数器文件堆积、主题疫情、大小写分叉、过期缓存、根目录凭证模式（只报模式+行号，永不回显密钥）、缺失索引、保留字 slug。基线机制让复跑只报新增 —— 不产生告警疲劳。永不删除任何东西；每条发现自带 <code>agent_instruction</code>。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🗺️</span>
+        <h3><span class="en ">Root <code>MANIFEST.md</code>: the store explains itself</span><span class="zh ">根 <code>MANIFEST.md</code>：store 自我说明</span></h3>
+        <p><span class="en ">Write-once, beside your data: cold-agent read order, sync / never-sync / regenerable classification (credentials file explicitly marked never-copy), and a condensed naming-grammar cheat-sheet — so a fresh agent in a VM with only the directory can orient without this repo's docs.</span><span class="zh ">Write-once，就在数据旁边：冷启动阅读顺序、可同步/禁同步/可再生分类（凭证文件明确标注永不复制）、命名语法速查 —— 在 VM 里只拿到目录的新 agent 无需本仓库文档即可定向。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">⚡</span>
+        <h3><span class="en ">Hot paths, measured then cut</span><span class="zh ">热路径：先测量，再削减</span></h3>
+        <p><span class="en ">session_start scanned the corrections dir 4× per call (a 4th hiding in the recognition chain) → now 2, with the KPI read deliberately fresh after this call's own outcome writes (an independent review caught the null-alignment regression the 986 green tests missed). The legacy journal index re-read every file body twice per write → incremental by mtime, kept because a live MCP resource reads it.</span><span class="zh ">session_start 每次调用扫 4 遍 corrections 目录（第 4 处藏在 recognition 链里）→ 现在 2 遍，其中 KPI 一读刻意保持在本次写入之后的新鲜态（独立评审抓到了 986 个绿测试没发现的 null-alignment 回归）。遗留 journal 索引每次写入把全部文件读两遍 → 按 mtime 增量，因有在线 MCP resource 消费而保留。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">986 core tests · 0 fail</span>
+      <span class="pill">5 worktree trains · zero-conflict merge</span>
+      <span class="pill">independent review: 1 HIGH found & fixed</span>
+      <span class="pill">first real-store scan: 34 findings baselined</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-07-27 (v3.4.40):</b> all 4 packages on npm. The hygiene scan runs nightly in the owner's dream loop from tonight; first scan independently re-found every issue the round table had found by hand — including the credential sitting next to the pinned cold-start files.</span><span class="zh "><b>2026-07-27 发布 (v3.4.40)：</b>4 个包全部上 npm。hygiene 扫描今晚起进 owner 的 dream loop 夜巡；首扫独立复现了圆桌手工找到的每一个问题 —— 包括躺在冷启动 pinned 文件旁边的那条凭证。</span></div>
+  </section>
+
+  <!-- v3.4.39 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.39</span>
+        <span class="major"><span class="en ">★ Audit hardening</span><span class="zh ">★ 审计加固</span></span>
+        <span class="date mono">2026-07-27</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Every audit finding reproduced, then fixed</span><span class="zh ">每个审计发现先复现，再修复</span></h2>
+      <p class="hero-lede"><span class="en ">An independent Codex audit filed 8 findings against the core. All 8 were <b>reproduced as failing tests first</b>, then fixed across four release trains: concurrency locks around every counter read-modify-write, genuine cross-source retrieval fusion, CJK-aware rule matching, and a rebuildable outcomes ledger. Plus the first ambient-recall groundwork: a rolling topic profile so background conversation informs what memory surfaces.</span><span class="zh ">一次独立的 Codex 审计对 core 提出 8 项发现。全部 8 项<b>先复现为失败测试</b>，再分四列发布车修复：所有计数器读改写包进并发锁、真正的跨源检索融合、中文规则匹配、可重建的 outcomes 账本。另加环境感知召回的第一块地基：滚动话题画像，让背景对话决定浮现哪些记忆。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">🔒</span>
+        <h3><span class="en ">Locks + a rebuildable ledger</span><span class="zh ">并发锁 + 可重建账本</span></h3>
+        <p><span class="en ">Outcome recording, retraction, and merge-consolidation now run inside the per-project file lock — concurrent sessions can't drop ledger rows or write a stale index. And because counters are derived state, <code>ar outcomes rebuild</code> recomputes them from the append-only ledger (dry-run default, malformed rows quarantined), with a store-doctor divergence check.</span><span class="zh ">结果记录、撤回、合并整合现在都在按项目文件锁内运行 —— 并发会话不再丢账本行或写出过期索引。计数器本是派生状态，<code>ar outcomes rebuild</code> 可从只追加账本重算（默认干跑，畸形行隔离），并配 store-doctor 分歧检查。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🔀</span>
+        <h3><span class="en ">Real cross-source fusion</span><span class="zh ">真正的跨源融合</span></h3>
+        <p><span class="en ">smart_recall's three searchers used to fuse by object identity — the same fact found twice never accumulated score. Fusion now keys on a canonical excerpt identity: multi-source hits rank above single-source ones, with <code>alsoFoundIn</code> provenance. A pre-push review caught the second-order bug too: insights fuse on title+excerpt, not severity+tags.</span><span class="zh ">smart_recall 的三路搜索过去按对象身份融合 —— 同一事实被找到两次也不累积分数。现在按规范化摘录身份融合：多源命中排在单源之上，附 <code>alsoFoundIn</code> 溯源。推送前评审还抓住了二阶 bug：insight 按标题+摘录融合，而非 severity+tags。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🈶</span>
+        <h3><span class="en ">Chinese rules now bite</span><span class="zh ">中文规则真正生效</span></h3>
+        <p><span class="en ">The pre-action rule matcher tokenized by whitespace — Chinese P0 rules could never match Chinese actions. Han runs now segment via <code>Intl.Segmenter</code> (bigram fallback), the length floor is script-scoped, and 禁止/不得/不能/不要 join the durable-rule gate with idiom guards (不得不 means <em>must</em>, not <em>must not</em> — it won't fire). And a data-loss bug caught during this very release: two same-day pure-CJK rules both slugified to <code>unnamed</code> and silently overwrote each other — degenerate slugs are now content-hashed (<code>unnamed-a1b2c3d4</code>) and occupied filenames get an id-hash suffix.</span><span class="zh ">行动前规则匹配器过去按空格分词 —— 中文 P0 规则永远匹配不上中文行动。现在汉字串经 <code>Intl.Segmenter</code> 分词（bigram 兜底），长度下限按文字系统区分，禁止/不得/不能/不要 进入持久规则门，并带成语守卫（不得不是"必须"，不会误触发）。还抓住一个本次发布期间才发现的数据丢失 bug：两条同日纯中文规则都被 slug 成 <code>unnamed</code> 而静默互相覆盖 —— 退化 slug 现在带内容哈希（<code>unnamed-a1b2c3d4</code>），被占用的文件名追加 id 哈希后缀。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">📡</span>
+        <h3><span class="en ">Hosts, lifecycle, ambient recall</span><span class="zh ">宿主、生命周期、环境感知召回</span></h3>
+        <p><span class="en ">3-tier host profiles (hooks / mcp-instructions / manual) with one canonical lifecycle-instruction source; session_start/end are idempotent (once-per-session claims, fingerprint dedup) with a local-only JSONL telemetry ledger. The SDK gains the modern composite API (<code>sessionStart/remember/recall/sessionEnd/check</code>), and the CLI gains a rolling topic profile — background conversation now informs ambient recall.</span><span class="zh ">3 层宿主画像（hooks / mcp-instructions / manual），生命周期指令单一权威来源；session_start/end 幂等（每会话一次领取、指纹去重），配纯本地 JSONL 遥测账本。SDK 获得现代复合 API（<code>sessionStart/remember/recall/sessionEnd/check</code>），CLI 获得滚动话题画像 —— 背景对话开始影响环境感知召回。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">all 8 audit findings: failing test → fix → green</span>
+      <span class="pill">867 core tests · 0 fail</span>
+      <span class="pill">independent review per train</span>
+      <span class="pill">CI: red = new breakage only</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-07-27 (v3.4.39):</b> all 4 packages on npm; Release Trains A–D merged via PR #37/#39. Tracked, not shipped: SDK root isolation (TOW2-324), standalone-prohibition capture design (TOW2-326) — both todo-marked in CI.</span><span class="zh "><b>2026-07-27 发布 (v3.4.39)：</b>4 个包全部上 npm；发布车 A–D 经 PR #37/#39 合入。已跟踪未发布：SDK root 隔离（TOW2-324）、独立禁止句捕获设计（TOW2-326）—— 均在 CI 中标记 todo。</span></div>
+  </section>
+
+  <!-- MAJOR: v3.4.38 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.38</span>
+        <span class="major"><span class="en ">★ Naming System v2</span><span class="zh ">★ 命名系统 v2</span></span>
+        <span class="date mono">2026-07-20</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">The filename is the index — designed by a 5-seat round table</span><span class="zh ">文件名即索引 —— 由五席圆桌设计</span></h2>
+      <p class="hero-lede"><span class="en ">A 10-question cold-start test on the live corpus scored the old naming at <b>55%</b> — and proved filenames alone top out at ~75–80% (identity and hard rules are paragraph-shaped). v2's answer is a two-audience split: the <b>filename</b> is the human/triage index (2–4 immutable-at-birth fields; printed <code>none--none</code> nulls are gone), and a <b>materialized <code>_index.md</code> per store</b> is the machine fast-path — severity-sorted for corrections, regenerated atomically on every write. Mutable fields (severity escalates, status flips) never enter a path: every path consumer — wikilinks, path-keyed mirrors, git history — treats it as identity.</span><span class="zh ">用 10 问冷启动测试给旧命名打分：<b>55%</b> —— 并证明纯文件名的天花板在 ~75–80%（identity 和硬规则是段落形状）。v2 的答案是双受众分工：<b>文件名</b>是人的分诊索引（2–4 个出生即不变的字段；打印出来的 <code>none--none</code> 空值消失），每个 store 一个<b>物化 <code>_index.md</code></b> 作为机器快速路径 —— corrections 按 severity 排序，每次写入原子重生成。可变字段（severity 会升级、status 会翻转）永不进入路径：每个路径消费者 —— wikilink、按路径键控的镜像、git 历史 —— 都把路径当身份。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">✂️</span>
+        <h3><span class="en ">Per-store grammar, nulls omitted</span><span class="zh ">按 store 语法，空值省略</span></h3>
+        <p><span class="en ">Journal: <code>{date}--{saveType}--[{sig}]--[{theme}]--{slug}.md</code> — a <code>none</code> tag is omitted, never printed. Corrections: <code>{date}--{rule-slug}.json</code> — the slug now derives from the <em>rule</em> (leading interjections stripped, EN + CJK incl. full-width punctuation), not the trigger utterance ("no-that-s-wrong" era ends). A 4th parser generation reads v2 alongside all 3 legacy generations — old files parse forever.</span><span class="zh ">Journal：<code>{date}--{saveType}--[{sig}]--[{theme}]--{slug}.md</code> —— <code>none</code> 标签直接省略，永不打印。Corrections：<code>{date}--{rule-slug}.json</code> —— slug 取自<em>规则</em>（剥离开头感叹词，支持英文 + 中文全角标点），不再是触发语（"no-that-s-wrong" 时代结束）。第 4 代 parser 与 3 个旧世代并存 —— 旧文件永远可读。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🔤</span>
+        <h3><span class="en ">One sanitizer: case-fold + byte budgets</span><span class="zh ">统一 sanitizer：大小写折叠 + 字节预算</span></h3>
+        <p><span class="en "><code>sanitizeName()</code>: lowercase + NFC + byte-capped (255-byte filesystem limits, not UTF-16 chars) + structurally cannot emit <code>--</code>. <code>resolveProjectDirName()</code> reuses an existing case-variant directory (deterministic pick + warning on pre-existing forks) — <code>agentrecall</code>/<code>AgentRecall</code> can no longer split your corpus on a case-sensitive filesystem. ~21 call sites routed through one resolver; a source-level guard test makes the bypass class unrecreatable.</span><span class="zh "><code>sanitizeName()</code>：小写 + NFC + 字节上限（对齐文件系统 255 字节限制，而非 UTF-16 字符数）+ 结构上不可能输出 <code>--</code>。<code>resolveProjectDirName()</code> 复用已存在的大小写变体目录（确定性选择 + 存量分叉告警）—— <code>agentrecall</code>/<code>AgentRecall</code> 再也不会在大小写敏感的文件系统上劈裂语料。约 21 处调用点收口到单一 resolver；源码级守卫测试让旁路类 bug 永久绝迹。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">📇</span>
+        <h3><span class="en ">Materialized indexes: names + ≤3 pinned files ⇒ 90%</span><span class="zh ">物化索引：名字 + ≤3 个固定文件 ⇒ 90%</span></h3>
+        <p><span class="en "><code>corrections/_index.md</code> (severity-first table: severity · failure_class · status · date · rule), <code>journal/_index.md</code> (last 10, filename-derived, zero content reads), <code>rooms/_index.md</code> (per-room overview). Atomic tmp+rename; a regen failure never fails the underlying write. The honest 90% path: <code>ls</code> + reading ≤3 pinned index files — not ever-richer filenames.</span><span class="zh "><code>corrections/_index.md</code>（severity 优先表：severity · failure_class · status · date · rule）、<code>journal/_index.md</code>（近 10 条，纯文件名推导，零内容读取）、<code>rooms/_index.md</code>（每房间概览）。原子 tmp+rename；索引重生成失败永不拖垮底层写入。诚实的 90% 路径：<code>ls</code> + 读 ≤3 个固定索引文件 —— 而不是无限加肥文件名。</span></p>
+        <p class="why"><span class="en ">Why: the cold-start test proved names alone cannot carry identity/hard-rules; the index bridge can.</span><span class="zh ">为什么：冷启动测试证明纯名字装不下 identity/硬规则；索引桥可以。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🛡️</span>
+        <h3><span class="en ">Zero-rename migration + race fixes</span><span class="zh ">零改名迁移 + 竞态修复</span></h3>
+        <p><span class="en ">Existing files are NEVER renamed (wikilinks, path-keyed mirrors, git history stay intact) — v2 applies to new writes only. Rewrite paths (retract/outcome/merge, skill rewrites) reuse the on-disk filename, so a grammar change can't orphan-duplicate old records. Same-day journal decide+write now runs under a per-project file lock (case-normalized lock keys). Underscore files excluded from journal scans — an <code>_index.md</code> can no longer knock a project off the status board.</span><span class="zh ">存量文件永不改名（wikilink、路径键控镜像、git 历史全部无损）—— v2 只对新写入生效。改写路径（撤回/结果/合并、技能改写）复用磁盘上的原文件名，语法变更不会孤儿化旧记录。同日 journal 的判定+写入现在在按项目的文件锁下运行（锁名大小写归一）。下划线文件排除出 journal 扫描 —— <code>_index.md</code> 再也不会把项目从状态板上挤掉。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">core 855 tests · 0 fail</span>
+      <span class="pill">tool-surface guard · 15/15</span>
+      <span class="pill">2 independent reviews · all CRITICAL/HIGH closed</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-07-20 (v3.4.38):</b> v2 naming live for all new writes; indexes materialize on first write per store; legacy names parse forever. Deferred to v2.1 (spec §7): room/topic-level case-fold, sig/theme vocabulary pruning, corrections-index extraction.</span><span class="zh "><b>2026-07-20 发布 (v3.4.38)：</b>v2 命名对所有新写入生效；每个 store 首次写入时物化索引；旧命名永远可读。递延至 v2.1（spec §7）：room/topic 级大小写折叠、sig/theme 词表瘦身、corrections-index 模块拆分。</span></div>
+  </section>
+
+  <!-- MAJOR: v3.4.37 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.37</span>
+        <span class="major"><span class="en ">★ RMR Wave 3</span><span class="zh ">★ RMR 第三波</span></span>
+        <span class="date mono">2026-07-14</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Cross-project recurrence detection + reflection harness kit</span><span class="zh ">跨项目复发检测 + 反思 harness 套件</span></h2>
+      <p class="hero-lede"><span class="en ">Every recurrence the detector had ever recorded was within-project — a known pattern violated again in a <em>different</em> project was invisible by construction. This release gives corrections a <code>failure_class</code> (stamped by a keyword classifier at capture, zero new deps) and adds a cross-project class join at session-end. The eval on the live corpus cleared the workpacket's Phase-0 gate: the first cross-project detection the system has ever made (a model-dispatch violation linked to its 2-month-older ancestor in another project), with 0/53 false positives on stride negatives and all pinned baselines unshifted. Ships with an experimental harness kit — the four memory verbs, a health scoreboard, an error-class taxonomy, and a periodic <code>/arreflect</code> loop that hunts <em>phantom gradient steps</em>: corrections whose rule was encoded yet whose error class recurred anyway.</span><span class="zh ">检测器历史上记录的所有复发都是项目内的 —— 已知模式在<em>另一个</em>项目再次违反，结构上就不可见。本版给纠正记录加上 <code>failure_class</code>（捕获时由关键词分类器盖章，零新依赖），并在 session-end 新增跨项目类别 join。真实语料 eval 通过了工作包的 Phase-0 门：系统有史以来第一次跨项目检出（一次 model-dispatch 违规连到了另一项目中早它两个月的始祖纠错），负样本 0/53 误报，全部锁定基线无漂移。随附实验性 harness 套件 —— 四个记忆动词、健康记分牌、错误分类税则、以及定期 <code>/arreflect</code> 循环，专门猎捕<em>幻影梯度步</em>：规则已编码、同类错误却照样复发的纠正。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">🏷️</span>
+        <h3><span class="en ">RD-1: failure_class at capture</span><span class="zh ">RD-1：捕获时的 failure_class</span></h3>
+        <p><span class="en ">9-value enum (<code>publish_gate</code>, <code>naming_violation</code>, <code>model_dispatch</code>, <code>skipped_verify</code>, <code>confidential_leak</code>, <code>framing_error</code>, <code>scope_violation</code>, <code>wrong_ref</code>, <code>other</code>) stamped by a tokenize/overlap keyword classifier — strict-max wins, zero hits or tie → <code>other</code>. Additive and optional: old records read as <code>other</code>, are never re-classified, never rewritten.</span><span class="zh ">9 值枚举，由 tokenize/overlap 关键词分类器盖章 —— 严格最大值获胜，零命中或并列 → <code>other</code>。纯增量可选字段：旧记录按 <code>other</code> 读取，永不重分类、永不改写。</span></p>
+        <p class="why"><span class="en ">Why: word-overlap alone can't group "wrong model routing" incidents that share zero ≥4-char words; a class key can.</span><span class="zh ">为什么：仅靠词重叠无法归并零共词的同类事故；类别键可以。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🔗</span>
+        <h3><span class="en ">RD-1: cross-project class join</span><span class="zh ">RD-1：跨项目类别 join</span></h3>
+        <p><span class="en ">When session-end sees a genuine-recurrence marker, a new additive pass scans ALL projects' active corrections for the same <code>failure_class</code> with rule-text token overlap ≥ 1, and books <code>recurred</code> under the <b>originating</b> correction's project. Auto-tags are excluded from the join key — the live-corpus eval showed tag tokens made overlap trivially satisfiable.</span><span class="zh ">session-end 见到真实复发标记时，新增的增量扫描在所有项目的活跃纠正中寻找同 <code>failure_class</code> 且规则正文 token 重叠 ≥ 1 的记录，并把 <code>recurred</code> 记到<b>始发</b>纠正所属项目。join 键排除自动 tags —— 真实语料 eval 显示 tag token 会让重叠条件被平凡满足。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">⚖️</span>
+        <h3><span class="en ">Eval honesty: Phase-0 cleared, recall claims deferred</span><span class="zh ">Eval 诚实账：Phase-0 通过，召回宣称递延</span></h3>
+        <p><span class="en ">Held-out (time-split 2026-06-01): <b>1 confirmed cross-project detection, 0/53 stride false positives → Phase-0 PASS</b>. Zero-regression: all pinned baselines verify, claim-gates unshifted. Held-in matchFn-surface recall was 20% (&lt;50% gate) — diagnosed as instrument-surface loss (redaction + truncation destroy record identity); the capture-time join surface reaches 60% active-only / 100% as-captured on the same pairs. The ≥50% recall claim stays deferred per the n≥39 gate.</span><span class="zh ">Held-out（2026-06-01 时间切分）：<b>1 例确认跨项目检出，负样本 0/53 误报 → Phase-0 通过</b>。零回归：全部锁定基线校验通过，claim-gates 无漂移。Held-in matchFn 面召回 20%（未达 50% 门）—— 诊断为仪器面损耗（redaction + 截断毁掉记录身份）；capture-time join 面在同样的对上达 60%（仅活跃）/ 100%（按捕获时点）。≥50% 召回宣称按 n≥39 门继续递延。</span></p>
+        <p class="why"><span class="en ">Why: a gate that fails is reported as failed — the metric is the product.</span><span class="zh ">为什么：没过的门就报没过 —— 指标本身就是产品。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🧰</span>
+        <h3><span class="en ">Experimental: recurrence &amp; reflection harness kit</span><span class="zh ">实验性：复发与反思 harness 套件</span></h3>
+        <p><span class="en "><code>experimental/harness-kit/</code>: the four memory verbs (<code>/arstart</code> · <code>/arsave</code> · <code>/arrecall</code> · <code>/arreflect</code>), a SessionStart health scoreboard, an error-class taxonomy with mechanical phantom detection, and a K-session reflection cadence with mid-session nudge. First validation run (one power-user harness, 2026-07-14): 8 error classes, 18 confirmed phantom gradient steps in 109 corrections, 6 rules re-abstracted same day. Python 3 stdlib only; rule edits stay owner-gated.</span><span class="zh "><code>experimental/harness-kit/</code>：四个记忆动词、SessionStart 健康记分牌、带机械幻影检测的错误分类税则、K-session 反思节奏 + 会话中催办。首次验证（单个重度用户 harness，2026-07-14）：109 条纠正中发现 8 个错误类、18 个确认幻影梯度步，当天完成 6 条规则重抽象。仅需 Python 3 标准库；规则修改始终由 owner 把关。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🚌</span>
+        <h3><span class="en ">Ride-along: loop runner + harness-change protocol</span><span class="zh ">顺风车：loop runner + harness 变更协议</span></h3>
+        <p><span class="en ">Two previously-unpushed commits ship in this release: the self-verifying agent loop runner (harness-run <code>doneCheck</code> as the only stop condition) and the harness-change acceptance protocol (bounded edit, dual regression, evaluator outside the loop).</span><span class="zh ">两个此前未推送的提交随本版发布：自校验 agent loop runner（harness-run <code>doneCheck</code> 为唯一停止条件）与 harness 变更验收协议（有界编辑、双重回归、评审者在环外）。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">core 789 tests · 0 fail</span>
+      <span class="pill">Phase-0 eval · PASS (1 detection, 0/53 FP)</span>
+      <span class="pill">claim-gates · unshifted</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-07-14 (v3.4.37):</b> failure_class live at capture; cross-project recurrence join active (warms up as new classified captures accrue — old records are never rewritten); harness kit published under <code>experimental/</code>. The held-in recall gate is re-scoped to the capture-time join surface for the next wave.</span><span class="zh "><b>2026-07-14 发布 (v3.4.37)：</b>failure_class 捕获即生效；跨项目复发 join 激活（随新分类捕获逐步热身 —— 旧记录永不改写）；harness 套件以 <code>experimental/</code> 发布。held-in 召回门下一波重定标到 capture-time join 面。</span></div>
+  </section>
+
+  <!-- MAJOR: v3.4.36 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.36</span>
+        <span class="major"><span class="en ">★ RMR Wave 2</span><span class="zh ">★ RMR 第二波</span></span>
+        <span class="date mono">2026-07-05</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Honest heed, lean injection, MCP diet</span><span class="zh ">诚实 heed、精简注入、MCP 瘦身</span></h2>
+      <p class="hero-lede"><span class="en ">The pre-C3 heed rate of 96.9% was an instrument artifact — default-heeded every time, no evidence required. This release fixes that at the source: a "heeded" verdict now requires at least one <code>check_action</code> trigger during the same day; everything else lands as "unknown". At the same time, the session-start correction payload was cut from ~2010 to 1489 median tokens, and the MCP surface was cut from 25 tools to 6 (default 5) after a 2,649-transcript census found 11 tools with zero organic use. Two new CLI verbs surface the dream-audit loop so verdicts can be closed manually.</span><span class="zh ">C3 之前 96.9% 的 heed 率是仪器假象 —— 每次默认 heeded，不需要任何证据。这一版从源头修复：「heeded」现在需要当天至少一次 <code>check_action</code> 触发，否则落地为「unknown」。同时，session-start 注入从约 2010 降至中位 1489 token，MCP surface 在 2,649 条转录的普查后从 25 个工具削减至 6 个（默认 5），11 个工具零有机使用。两条新 CLI 命令让 dream-audit 回路可手动关账。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card flag">
+        <span class="ic">🔒</span>
+        <h3><span class="en ">C3: evidence-grounded heed (BREAKING)</span><span class="zh ">C3：证据驱动 heed（破坏性变更）</span></h3>
+        <p><span class="en "><code>session_end</code> default outcome changes from <b>"heeded"</b> to <b>"unknown"</b>. A "heeded" verdict requires a same-day <code>"triggered"</code> event from <code>check_action</code>. Pre-C3 events stamped <code>default-heeded</code> are instrument artifacts; the boundary date <code>2026-07-03</code> separates the two regimes in <code>rmr-report.mjs</code>.</span><span class="zh "><code>session_end</code> 默认结果从 <b>"heeded"</b> 改为 <b>"unknown"</b>。"heeded" 需要当天 <code>check_action</code> 产生的 <code>"triggered"</code> 事件。C3 前的 <code>default-heeded</code> 事件是仪器假象；边界日期 <code>2026-07-03</code> 在 <code>rmr-report.mjs</code> 中分隔两个制度。</span></p>
+        <p class="why"><span class="en ">Why: a metric that auto-passes 97% of the time measures nothing — it was the instrument, not the behavior.</span><span class="zh ">为什么：自动通过 97% 的指标什么也测不出来 —— 衡量的是仪器，不是行为。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">✂️</span>
+        <h3><span class="en ">C2: injection diet (–26% median tokens)</span><span class="zh ">C2：注入瘦身（中位 −26% token）</span></h3>
+        <p><span class="en ">Session-start correction payload: ~2010 → 1489 median tokens. <code>SlimCorrection</code> strips KPI counter fields; per-section char budgets enforced (corrections_total 1200 chars). P0 corrections <b>always survive</b> the cap (controlled overflow, not silent truncation).</span><span class="zh ">session-start 注入：约 2010 → 1489 中位 token。<code>SlimCorrection</code> 去掉 KPI 计数字段；分节字符预算强制执行（corrections_total 1200 字符）。P0 纠正<b>始终幸存</b>（受控溢出，不静默截断）。</span></p>
+        <p class="why"><span class="en ">Why: every context token is a tax; shrink the tax without losing the signal that matters.</span><span class="zh ">为什么：每个上下文 token 都是税；在不丢失关键信号的前提下压税。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🗑️</span>
+        <h3><span class="en ">P3a/b: MCP surface 25 → 6 tools</span><span class="zh ">P3a/b：MCP surface 25 → 6 工具</span></h3>
+        <p><span class="en ">11 zero-organic-use tools deleted after a 2,649-transcript, 60-day census (<code>skill_write</code>, <code>dashboard_export</code>, <code>project_board</code>, and 8 more). 7 more quarantined to <code>AR_EXTRAS=1</code>. Default surface: 5 tools. Snapshot guard <code>tool-surface-purity.test.mjs</code> locks all 3 tiers.</span><span class="zh ">在 2,649 条转录、60 天普查后删除 11 个零有机使用工具（<code>skill_write</code>、<code>dashboard_export</code>、<code>project_board</code> 等）。另 7 个隔离至 <code>AR_EXTRAS=1</code>。默认 surface：5 个工具。快照守卫 <code>tool-surface-purity.test.mjs</code> 锁定三层。</span></p>
+        <p class="why"><span class="en ">Why: an LLM given 25 rarely-used tools picks the wrong one; fewer choices = more reliable selection.</span><span class="zh ">为什么：给 LLM 25 个少用工具，它会选错；选择越少，选对越可靠。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🌙</span>
+        <h3><span class="en ">C3b: dream-audit verdict surface</span><span class="zh ">C3b：dream-audit 判定界面</span></h3>
+        <p><span class="en "><code>ar outcomes audit-candidates</code> lists "unknown" corrections for a given date. <code>ar outcomes record</code> writes a dream-audit verdict (<code>not_triggered | recurred | heeded</code>). <code>not_triggered</code> is single-producer enforced — evidence must start with <code>"dream-audit:"</code>.</span><span class="zh "><code>ar outcomes audit-candidates</code> 列出指定日期的「unknown」纠正。<code>ar outcomes record</code> 写入 dream-audit 判定（<code>not_triggered | recurred | heeded</code>）。<code>not_triggered</code> 强制单生产者 —— evidence 必须以 <code>"dream-audit:"</code> 开头。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">📊</span>
+        <h3><span class="en ">M1 baselines + measured-truth README</span><span class="zh ">M1 基线 + 实测 README</span></h3>
+        <p><span class="en ">Capture recall baseline: <b>35.3%</b> [CI 17.3–58.7]. Root cause: hook-no-fire (coverage bug, not classification). Pre-C3 heed rate 96.9% marked instrument-artifact. Unfalsifiable claims + competitor table <b>removed</b> from README; replaced with artifact-cited metrics table (891 tests, B2 bench green).</span><span class="zh ">捕获召回基线：<b>35.3%</b>（CI 17.3–58.7）。根因：hook-no-fire（覆盖率 bug，非分类 bug）。C3 前 96.9% heed 率标注为仪器假象。README 中无法证伪的声明 + 竞品对比表<b>已删除</b>；替换为制品引用的指标表（891 测试，B2 bench 绿色）。</span></p>
+        <p class="why"><span class="en ">Why: you cannot improve a metric you cannot measure; the competitor table was marketing, not engineering.</span><span class="zh ">为什么：测不准就无法改善；竞品对比表是 marketing，不是工程。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🔧</span>
+        <h3><span class="en ">C0: npx +x hotfix (since v3.4.21)</span><span class="zh ">C0：npx +x 修复（自 v3.4.21 起）</span></h3>
+        <p><span class="en "><code>tsc</code> strips the execute bit from <code>dist/server.js</code> on every build. <code>npx agent-recall-mcp</code> silently failed since v3.4.21 unless the user manually <code>chmod +x</code>. Build script now: <code>tsc &amp;&amp; chmod +x dist/server.js</code>. Pack-test verified correct mode (0755 in tarball).</span><span class="zh "><code>tsc</code> 每次构建都会去掉 <code>dist/server.js</code> 的执行位。自 v3.4.21 起 <code>npx agent-recall-mcp</code> 无声失败，除非用户手动 <code>chmod +x</code>。构建脚本改为：<code>tsc &amp;&amp; chmod +x dist/server.js</code>。打包测试验证了正确权限（tarball 中 0755）。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">891 tests · 0 fail</span>
+      <span class="pill">npx smoke · exit 0</span>
+      <span class="pill">MCP surface locked · 3-tier snapshot</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-07-05 (v3.4.36):</b> C3 heed semantics live (BREAKING: boundary 2026-07-03); injection diet active; MCP trimmed to 5 default tools; dream-audit CLI surface shipped; <code>npx agent-recall-mcp</code> +x fix closes the v3.4.21 regression. Capture recall baseline (35.3%) is a <b>measured fact</b>, not a design target — the next wave addresses hook coverage.</span><span class="zh "><b>2026-07-05 发布 (v3.4.36)：</b>C3 heed 语义生效（破坏性：边界 2026-07-03）；注入瘦身激活；MCP 裁剪至 5 个默认工具；dream-audit CLI 界面发布；<code>npx agent-recall-mcp</code> +x 修复关闭 v3.4.21 回归。捕获召回基线（35.3%）是<b>实测事实</b>，不是设计目标 —— 下一波解决 hook 覆盖率。</span></div>
+  </section>
+
+  <!-- MAJOR: v3.4.35 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.35</span>
+        <span class="major"><span class="en ">★ Corrections engine</span><span class="zh ">★ 纠正引擎</span></span>
+        <span class="date mono">2026-06-29</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Corrections, matured</span><span class="zh ">纠正库，成熟化</span></h2>
+      <p class="hero-lede"><span class="en ">The corrections store was a flat pile: every intake wrote a new file, near-duplicates accumulated forever, nothing aged or re-ranked. This release brings it up to the maturity AgentRecall already applies elsewhere — borrowing the <b>real</b> mechanisms from Hindsight (Vectorize's open memory engine) after a source-level audit found ~half its marketing isn't in the OSS code (no "confidence + doubled-penalty" math, no opinion network — the real signal is an integer proof-count). All implemented <b>AR-native</b>: local, file-backed, <b>zero LLM on the storage path</b>. Any action that mutates existing belief is <b>suggest-only</b> unless you opt in.</span><span class="zh ">纠正库过去是一堆扁平文件：每次写入都新建文件，近重复无限堆积，不老化、不重排。这一版把它提升到 AgentRecall 别处早有的成熟度 —— 在源码级审计发现 Hindsight（Vectorize 的开源记忆引擎）约一半 marketing 在 OSS 代码里根本没有之后（没有「confidence + 双倍降权」那套数学、没有 opinion 网络 —— 真实信号是一个整数 proof-count），只借它<b>真实落地</b>的机制。全部<b>AR 原生</b>实现：本地、文件存储、<b>存储路径零 LLM</b>。任何改写既有信念的动作都<b>默认只建议</b>，除非你显式开启。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">🧩</span>
+        <h3><span class="en ">Consolidation + proof-count</span><span class="zh ">合并 + proof-count</span></h3>
+        <p><span class="en ">A re-stated rule now <b>folds into</b> the existing record (<code>proof_count++</code>, tags merged, stronger severity kept) instead of spawning a duplicate file. Gate is <b>verbatim-only</b> (normalized exact match) — zero risk of merging two distinct rules.</span><span class="zh ">复述的规则现在<b>折叠进</b>已有记录（<code>proof_count++</code>、并 tags、保留更强 severity），不再生成重复文件。合并门是<b>逐字级</b>（规范化精确相等）—— 零风险，绝不把两条不同规则并掉。</span></p>
+        <p class="why"><span class="en ">Why: stop duplicate accumulation at the source; evidence count, not file count.</span><span class="zh ">为什么：在源头掐断重复堆积；看证据计数，不看文件数。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">📊</span>
+        <h3><span class="en ">Evidence-grounded confidence</span><span class="zh ">证据驱动的置信度</span></h3>
+        <p><span class="en "><code>proof_confidence</code> = Beta posterior over (heeded, recurrence): a rule that keeps being honored <b>strengthens</b>; one whose bug keeps recurring <b>weakens</b>. Kept separate from <code>weight</code> (the static authority prior).</span><span class="zh "><code>proof_confidence</code> = (heeded, recurrence) 上的 Beta 后验：一条持续被遵守的规则<b>变强</b>，一条 bug 反复复发的规则<b>变弱</b>。与 <code>weight</code>（静态权威先验）分开。</span></p>
+        <p class="why"><span class="en ">Why: a correction's trust should track whether it actually works, not just its severity.</span><span class="zh ">为什么：一条纠正的可信度应反映它是否真的奏效，而不只是它的 severity。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🎯</span>
+        <h3><span class="en ">Ranked surfacing</span><span class="zh ">排序露出</span></h3>
+        <p><span class="en ">When P0 corrections exceed the surfacing cap, they're now ordered by <b>severity → proof_confidence → recency → proof_count</b> instead of arbitrary newest-first. The most authoritative, evidence-backed rules win the slot.</span><span class="zh ">当 P0 纠正超过露出上限时，现在按 <b>severity → proof_confidence → recency → proof_count</b> 排序，不再是任意最新优先。最权威、最有证据支撑的规则赢得席位。</span></p>
+      </div>
+      <div class="card flag">
+        <span class="ic">🔒</span>
+        <h3><span class="en ">Supersession + cleanup — suggest-default</span><span class="zh ">取代 + 清理 —— 默认只建议</span></h3>
+        <p><span class="en ">A new correction that <b>contradicts</b> an old one (version / status / key-value) can supersede it; low-signal and stale rules are flagged for review. All of it <b>suggests only</b> — it mutates nothing unless <code>AR_CONSOLIDATE_AUTO=1</code>.</span><span class="zh ">与旧规则<b>矛盾</b>的新纠正（版本 / 状态 / 键值）可取代它；低信号与陈旧规则被标记复查。全部<b>只建议</b> —— 除非 <code>AR_CONSOLIDATE_AUTO=1</code>，否则什么都不改。</span></p>
+        <p class="why"><span class="en ">Why: deleting belief is a deliberate act — the default never does it for you. Scope: catches version/status/key-value contradictions, not arbitrary semantic ones.</span><span class="zh ">为什么：删除信念是一个慎重的动作 —— 默认绝不替你做。范围：抓版本/状态/键值矛盾，抓不到任意语义矛盾。</span></p>
+      </div>
+      <div class="card reflect">
+        <span class="ic">💡</span>
+        <h3><span class="en ">Learning — verify against source, not the README</span><span class="zh ">新知 —— 对着源码核实，不是 README</span></h3>
+        <p><span class="en ">A source-level read of Hindsight found <b>~half its headline mechanisms absent from the OSS engine</b> (the confidence/penalty math, the opinion network, the "4 networks" split). The genuinely borrowable ideas were the humble ones: an integer proof-count and refine-not-overwrite. And AR already had the retrieval engine (RRF + Beta) — it just wasn't pointed at corrections.</span><span class="zh ">对 Hindsight 的源码级阅读发现<b>约一半招牌机制在 OSS 引擎里根本不存在</b>（confidence/penalty 数学、opinion 网络、「4 网络」拆分）。真正可借的是朴素的那些：一个整数 proof-count 和 refine-not-overwrite。而 AR 早就有检索引擎（RRF + Beta）—— 只是没对准 corrections。</span></p>
+        <p class="why"><span class="en ">Why: a competitor's marketing is a hypothesis; its code is the evidence.</span><span class="zh ">为什么：对手的 marketing 是假设，它的代码才是证据。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">720 tests · 0 fail</span>
+      <span class="pill">storage path · zero LLM</span>
+      <span class="pill">self-audit · ship-as-is</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-06-29 (v3.4.35):</b> consolidation + proof-count, evidence-grounded confidence, ranked surfacing are <b>live-wired</b>; supersession + noise/stale review ship as tested, opt-in functions (auto-wiring into session_end is a follow-up). <i>Honest: this batch had an author <b>self-audit</b> (ship-as-is) but the independent round-table review was infra-blocked this session — it is owed and will run before the next release. Consolidation is verbatim-only by design; paraphrase-level merge stays out of the zero-LLM storage path.</i></span><span class="zh "><b>2026-06-29 发布 (v3.4.35)：</b>合并 + proof-count、证据驱动置信度、排序露出已<b>接入生效</b>；取代 + 噪声/陈旧复查作为已测试、可选开启的函数发布（接入 session_end 是后续）。<i>诚实：这批做了作者<b>自审</b>（可发布），但独立 round-table 审查本次被 infra 卡住 —— 这道仍欠着，下个版本前补上。合并按设计是逐字级；paraphrase 级合并不进零-LLM 的存储路径。</i></span></div>
+  </section>
+
+  <!-- MAJOR: v3.4.33 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.33</span>
+        <span class="major"><span class="en ">★ Cross-surface release</span><span class="zh ">★ 跨平台版本</span></span>
+        <span class="date mono">2026-06-22</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">The Cross-Surface Adapter</span><span class="zh ">跨平台 Adapter</span></h2>
+      <p class="hero-lede"><span class="en ">AgentRecall's auto-lifecycle used to fully fire only on Claude Code (which has hooks). This release makes the <b>agent itself</b> the lifecycle driver on hook-less hosts (Codex, chatbox, OpenClaw) — honestly: no fake "AUTO" badge where a host physically can't auto-fire. Built in 6 phases, each ground→design→adversarial-verify→converge, then a full-suite security sweep. Also ships the 14-loop autonomous hardening run.</span><span class="zh ">AgentRecall 的自动生命周期过去只在 Claude Code（有 hooks）完整运作。这一版让 <b>agent 自己</b>在无 hook 的宿主（Codex、chatbox、OpenClaw）上驱动生命周期 —— 诚实地:不在物理上无法自动触发的宿主上贴假「AUTO」标。6 个阶段构建,每个都 ground→设计→对抗验证→收敛,最后全量安全扫描。同时附带 14-loop 自主硬化成果。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">🧭</span>
+        <h3><span class="en ">Agent-driven lifecycle</span><span class="zh ">Agent 自驱生命周期</span></h3>
+        <p><span class="en ">A server-level MCP <code>instructions</code> carrier + tool-description timing tags + a read-only <code>brief()</code> tool tell the agent to recall at start, save on durable intent, and close at exit — wherever hooks can't reach.</span><span class="zh ">MCP server 级 <code>instructions</code> 载体 + 工具时序标签 + 只读 <code>brief()</code> 工具,告诉 agent 开局 recall、有持久意图就存、退出前收尾 —— 在 hooks 够不到的地方。</span></p>
+        <p class="why"><span class="en ">Honest: on hook-less hosts this is best-effort agent-driven, not magic auto-save — and unmeasured on real hosts yet.</span><span class="zh ">诚实:无 hook 宿主上这是尽力而为的 agent 自驱,不是魔法自动存 —— 且尚未在真实宿主上测量。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🔀</span>
+        <h3><span class="en ">Two-lane capture, local-first</span><span class="zh ">双道捕获,本地优先</span></h3>
+        <p><span class="en ">An explicit "save/记住" (from you OR the agent) writes the <b>local</b> raw archive liberally; passive text still passes the v4 capture gate. Storage isn't the constraint — losing a correction is.</span><span class="zh ">显式「save/记住」(你或 agent)放开写<b>本地</b>无损档案;被动文本仍过 v4 捕获门。存储不是约束 —— 丢失纠正才是。</span></p>
+      </div>
+      <div class="card flag">
+        <span class="ic">🔒</span>
+        <h3><span class="en ">Privacy: one egress chokepoint</span><span class="zh ">隐私:单一出口闸</span></h3>
+        <p><span class="en ">No cloud config → zero egress. Every Supabase write is scrubbed (prompt-injection + secret-scan) <b>inside the egress primitive</b> — verified impossible to bypass. Bootstrap reads are realpath-jailed + secret-filtered + consent-gated.</span><span class="zh ">没配云 → 零外传。每次 Supabase 写入都在<b>出口原语内部</b>过 scrub(注入清洗 + 密钥扫描)—— 验证过绕不开。Bootstrap 读取有 realpath 牢笼 + 密钥过滤 + 同意门控。</span></p>
+        <p class="why"><span class="en ">A live secret-egress hole (backfill bypass) was caught by the final sweep and closed at the chokepoint.</span><span class="zh ">最终扫描抓到一个真·密钥外传漏洞(backfill 绕过),在闸点堵死。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🖥️</span>
+        <h3><span class="en ">Surface-agnostic status board</span><span class="zh ">跨平台状态看板</span></h3>
+        <p><span class="en "><code>ar status</code> + a pure <code>renderBoard</code> + <code>project_board(format:text)</code> — the cockpit now works on any surface, not just the Claude skill.</span><span class="zh "><code>ar status</code> + 纯 <code>renderBoard</code> + <code>project_board(format:text)</code> —— 驾驶舱现在任意宿主可用,不再只是 Claude skill。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">694 tests · 0 fail</span>
+      <span class="pill">6 phases · each round-table-verified</span>
+      <span class="pill">security · exploits probed</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-06-22 (v3.4.33):</b> 8 adapter commits + the 14-loop hardening. <i>Tier-B agent-self-drive is structurally in place but not yet measured on real Codex/chatbox sessions (per-host eval pending). npm publish tracked separately.</i></span><span class="zh "><b>2026-06-22 发布 (v3.4.33):</b>8 个 adapter commit + 14-loop 硬化。<i>Tier-B 的 agent 自驱已结构就位,但尚未在真实 Codex/chatbox 会话上测量(各宿主 eval 待办)。npm 发布另行处理。</i></span></div>
+  </section>
+
+  <!-- REFLECTION: Autonomous Loops 12–14 (local, not released) -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="reflect-badge"><span class="en ">Reflections &amp; Learnings</span><span class="zh ">反思与新知</span></span>
+        <span class="major" style="color:var(--reflect);background:var(--reflect-bg);"><span class="en ">shipped in v3.4.33</span><span class="zh ">已并入 v3.4.33</span></span>
+        <span class="date mono">2026-06-22</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Autonomous Loops 12–14</span><span class="zh ">自主优化 Loops 12–14</span></h2>
+      <p class="hero-lede"><span class="en ">A different <b>kind</b> of entry (hence the violet cards): not a shipped feature set, but the autonomous follow-up loops + the honest learnings they earned. All on branch <code>opt/autonomous-loops</code> — <b>nothing pushed, no version bump</b> (REDLINE held). Kept here so the <i>type</i> of update — reflection, not release — is distinguishable at a glance.</span><span class="zh ">一种<b>不同类型</b>的条目(所以用紫色卡):不是已发布的功能集,而是自主延伸的几个 loop + 它们换来的诚实结论。全部在分支 <code>opt/autonomous-loops</code> —— <b>未 push、未升版本</b>(红线守住)。放这里是为了让「更新的<i>类型</i>」—— 反思而非发布 —— 一眼可辨。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card reflect">
+        <span class="ic">🔧</span>
+        <h3><span class="en ">Loop 12 — Live-store repair</span><span class="zh ">Loop 12 — 真实库修复</span></h3>
+        <p><span class="en ">New <code>store-repair.ts</code> (write-side sibling to the read-only <code>store-doctor</code>). With your authorization it fixed <b>3 real findings on the live store</b> — 16-room index drift, a 23-day dead lock, a null consume marker — <code>red→ok</code>, <b>zero content lost</b> (diff-verified vs a backup). Dry-run by default, idempotent.</span><span class="zh ">新增 <code>store-repair.ts</code>(只读 <code>store-doctor</code> 的写操作姊妹)。你授权后在<b>真实库修好 3 个真问题</b> —— 16 room 索引漂移、23 天废锁、null consume marker —— <code>red→ok</code>,<b>零内容丢失</b>(对比备份验证)。默认 dry-run、幂等。</span></p>
+        <p class="why"><span class="en ">Why: diagnosis without a safe, reversible remedy is half a tool.</span><span class="zh ">为什么:只有诊断、没有安全可逆的修复,只是半个工具。</span></p>
+      </div>
+      <div class="card reflect">
+        <span class="ic">🧪</span>
+        <h3><span class="en ">Loop 13 — Learned representation: tested, declined</span><span class="zh ">Loop 13 — 学得表示:实测后否决</span></h3>
+        <p><span class="en ">The long-standing "next bet" (sentence embeddings) was tested <b>eval-first</b>, zero-key (local MiniLM). On the real corpus it showed <b>no benefit</b> — 1/13 vs lexical 2/13; adversarial paraphrase bridged only 2/8; <b>0</b> natural paraphrase pairs exist. <b>Dependency declined.</b></span><span class="zh ">长期挂着的「下一个赌注」(句向量)被<b>eval-first</b>、零 key(本地 MiniLM)实测。真实语料上<b>无收益</b> —— 1/13 vs 词法 2/13;对抗改写只桥接 2/8;天然改写对为 <b>0</b>。<b>依赖否决。</b></span></p>
+        <p class="why"><span class="en ">Why: an experiment that says "no" with proof saved a 25 MB dependency for zero gain.</span><span class="zh ">为什么:一个用证据说「不」的实验,省掉了一个零收益的 25MB 依赖。</span></p>
+      </div>
+      <div class="card reflect">
+        <span class="ic">🔎</span>
+        <h3><span class="en ">Loop 14 — Loop 8 re-verified + precision fix</span><span class="zh ">Loop 14 — Loop 8 复验 + 修精度泄漏</span></h3>
+        <p><span class="en ">Supplied the independent round-table Loop 8 never got. Core v3 gate re-verified <b>SOUND</b>; reviewers found a MEDIUM false-accept (hedged filler) → fixed (GATE v4, recall-safe, eval unchanged) and an overclaim → corrected. <b>All 14 loops now independently verified.</b></span><span class="zh ">补上了 Loop 8 当时被截断的独立 round-table。v3 门核心复验为 <b>SOUND</b>;reviewer 发现 1 个 MEDIUM 误收(hedged filler)→ 已修(GATE v4,recall 不变)+ 1 处夸大 → 已纠正。<b>14 个 loop 现在全部独立复验过。</b></span></p>
+        <p class="why"><span class="en ">Why: "self-verified" is a promissory note; the round-table is what cashes it.</span><span class="zh ">为什么:「自验证」只是张欠条,round-table 才是兑现它的人。</span></p>
+      </div>
+      <div class="card reflect">
+        <span class="ic">💡</span>
+        <h3><span class="en ">Learning — the ceiling is DATA, not the algorithm</span><span class="zh ">新知 — 天花板是数据,不是算法</span></h3>
+        <p><span class="en ">"Understanding" hit one ceiling, now confirmed <b>five independent ways</b> (L3 · L9 · L10 · L11 · L13). The corpus is intent-sparse and the same-intent pairs that exist are lexically obvious — so a fancier matcher adds nothing. The real unlock is <b>more data carrying the "same intent, different words" signal</b>.</span><span class="zh ">「理解」撞上同一道天花板,现在<b>五种独立方式</b>都确认(L3 · L9 · L10 · L11 · L13)。语料意图稀疏,而存在的同意图对在词法上就很明显 —— 更花哨的匹配器加不了分。真正的解法是<b>更多带「同意图、换措辞」信号的数据</b>。</span></p>
+        <p class="why"><span class="en ">Why: stop optimizing the matcher; the lever is capture, not algorithm.</span><span class="zh ">为什么:别再优化匹配器了;杠杆在捕获,不在算法。</span></p>
+      </div>
+      <div class="card reflect">
+        <span class="ic">🪞</span>
+        <h3><span class="en ">Learning — my drafts skew optimistic</span><span class="zh ">新知 — 我的初稿系统性偏乐观</span></h3>
+        <p><span class="en ">The round-table caught my <i>own</i> errors <b>six times</b> (L1 dead-code · L4 bug-masking test · L7/L13/L14 overclaims · L12 config). Every first framing was rosier than the truth. The honest takeaway: <b>"never self-review" isn't hygiene, it's load-bearing</b> — the discipline saves the work, not my restraint.</span><span class="zh ">round-table <b>六次</b>抓到我<i>自己</i>的错(L1 死代码 · L4 掩盖 bug 的测试 · L7/L13/L14 夸大 · L12 配置)。每一版初稿都比真相漂亮。诚实结论:<b>「永不自审」不是卫生习惯,是承重墙</b> —— 救下成果的是纪律,不是我的克制。</span></p>
+        <p class="why"><span class="en ">Why: an agent that knows its own bias designs the harness to catch it.</span><span class="zh ">为什么:知道自己偏差的 agent,会把验证机制设计成能抓住这个偏差。</span></p>
+      </div>
+      <div class="card reflect">
+        <span class="ic">🧰</span>
+        <h3><span class="en ">Learning — the scoreboard outlives the player</span><span class="zh ">新知 — 记分牌比选手活得久</span></h3>
+        <p><span class="en ">The reusable <code>matchFn</code> hook let the embedding be A/B'd on the <b>exact production harness</b> (provably fair) without touching prod. The lasting asset isn't any matcher — it's the honest LOO/paraphrase/cross-project scoreboard any future idea must beat.</span><span class="zh ">可复用的 <code>matchFn</code> 钩子让 embedding 在<b>生产同一个 harness</b> 上 A/B(可证公平),不碰生产。真正的资产不是某个匹配器,而是那套诚实的 LOO/改写/跨项目记分牌 —— 任何未来想法都得先打败它。</span></p>
+        <p class="why"><span class="en ">Why: invest in measurement; it pays out across every later bet.</span><span class="zh ">为什么:投资于测量,它在之后每一个赌注上都回本。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">694 tests · 0 fail</span>
+      <span class="pill">14 loops · all verified</span>
+      <span class="pill">33 commits · NOT pushed</span>
+      <span class="pill">REDLINE held</span>
+    </div>
+    <div class="shipped" style="background:var(--reflect-bg);border-color:var(--reflect);"><span class="en "><b>Status:</b> shipped in <b>v3.4.33</b> — merged to <code>main</code> + pushed to GitHub (Goldentrii) on 2026-06-22. Full record: <code>docs/internal/OPTIMIZATION-LOOPS.html</code>.</span><span class="zh "><b>状态:</b>已并入 <b>v3.4.33</b> —— 2026-06-22 合并入 <code>main</code> 并推送到 GitHub(Goldentrii)。完整记录:<code>docs/internal/OPTIMIZATION-LOOPS.html</code>。</span></div>
+  </section>
+
+  <!-- MAJOR: v3.4.32 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.32</span>
+        <span class="major"><span class="en ">★ Major release</span><span class="zh ">★ 重大版本</span></span>
+        <span class="date mono">2026-06-20</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Memory → Understanding</span><span class="zh ">从记忆到理解</span></h2>
+      <p class="hero-lede"><span class="en ">The shift from a <b>memory</b> system (collect &amp; recall) to an <b>understanding</b> system (anticipate). Two structural moves: a <b>two-tier memory</b> (lossless archive under a compressed model, joined by a confidence bridge) and <b>predict-the-correction</b> — surfacing a warning <i>before</i> you have to give it. Five waves, each fact-checked against the live code, adversarially verified, and code-reviewed.</span><span class="zh ">从<b>记忆</b>系统（收集与召回）迈向<b>理解</b>系统（预判）。两招:<b>双层记忆</b>（无损档案层 + 压缩模型层,以置信度桥相连）与 <b>predict-the-correction</b> —— 在你开口纠正<i>之前</i>就把警告推出来。五个 Wave,每个都对照真实代码核实、对抗式验证并经 code-review。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">🧠</span>
+        <h3><span class="en ">Two-tier memory + bridge</span><span class="zh ">双层记忆 + 桥</span></h3>
+        <p><span class="en ">A lossless verbatim archive (<code>journal/archive/raw/</code>) written on every session end, under a lossy compressed model. When confidence is low, recall <b>drills down</b> to the verbatim source instead of bluffing.</span><span class="zh ">每次会话结束写入无损逐字档案（<code>journal/archive/raw/</code>），其上是有损的压缩模型。置信度低时,召回会<b>回钻</b>到原文,而不是硬编一个不确定的答案。</span></p>
+        <p class="why"><span class="en ">Why: a floor nothing falls through, plus a model that knows when to fall back.</span><span class="zh ">为什么:一个谁也漏不下去的地板,加上一个知道何时回退的模型。</span></p>
+      </div>
+      <div class="card flag">
+        <span class="ic">🔒</span>
+        <h3><span class="en ">Privacy sync gate</span><span class="zh ">隐私同步门控</span></h3>
+        <p><span class="en ">Plugged a <b>live</b> leak: the behavioral/awareness layer was syncing to Supabase on every write. New <code>classification.ts</code> (personal vs project) gates it; <code>sync_personal=false</code> by default.</span><span class="zh ">堵住一个<b>正在发生</b>的泄漏:行为/awareness 层此前每次写入都同步到 Supabase。新增 <code>classification.ts</code>(personal vs project)做门控,默认 <code>sync_personal=false</code>。</span></p>
+        <p class="why"><span class="en ">Why: your behavioral model must not leave the machine by default.</span><span class="zh ">为什么:你的行为模型默认不该出本机。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">♻️</span>
+        <h3><span class="en ">Compression that compounds</span><span class="zh ">会复利的压缩</span></h3>
+        <p><span class="en ">Revived the dormant FSRS reinforce-on-recall loop (throttled), added an in-repo decay pass, made the <code>archived</code> flag actually filter, and a crystallization-candidate detector.</span><span class="zh ">复活沉睡的 FSRS reinforce-on-recall 回路(带节流),新增仓内 decay pass,让 <code>archived</code> 标志真正生效过滤,并加入结晶候选检测。</span></p>
+        <p class="why"><span class="en ">Why: what you use survives; what you don't fades. Collect → compress into rules.</span><span class="zh ">为什么:用得多的留存,用不到的褪色。从堆积转向压缩成规则。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🧭</span>
+        <h3><span class="en ">Predict-the-correction</span><span class="zh ">预测纠正</span></h3>
+        <p><span class="en ">An authoritative P0 correction now <b>overrides</b> a conflicting plan (<code>verdict:'blocked'</code>). A Blind-Spots profile is auto-derived from accumulated corrections (personal tier, sync-excluded); <code>predictCorrection</code> pushes it as an early prior.</span><span class="zh ">权威 P0 纠正现在会<b>压倒</b>冲突的计划(<code>verdict:'blocked'</code>)。从累积纠正自动推导 Blind-Spots 画像(personal 层,默认不同步);<code>predictCorrection</code> 把它作为提前先验注入。</span></p>
+        <p class="why"><span class="en ">Why: memory recalls the past; understanding anticipates the next correction.</span><span class="zh ">为什么:记忆调取过去,理解预判下一次纠正。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🗜️</span>
+        <h3><span class="en ">Bounded growth</span><span class="zh ">有界增长</span></h3>
+        <p><span class="en "><code>pruneRawArchive</code> gzips or removes raw segments once they are both old AND consumed (<code>mtime ≤ .consumed.json lastConsumedAt</code>). A null marker prunes nothing — undistilled bytes are never discarded.</span><span class="zh "><code>pruneRawArchive</code> 在原始段「超期且已消费」(<code>mtime ≤ .consumed.json lastConsumedAt</code>)时 gzip 或删除。marker 为 null 时一律不剪 —— 未蒸馏的字节绝不丢弃。</span></p>
+        <p class="why"><span class="en ">Why: bound <code>~/.agent-recall</code> growth without ever losing the lossless floor.</span><span class="zh ">为什么:在不丢失无损地板的前提下,约束 <code>~/.agent-recall</code> 的体积增长。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">✅</span>
+        <h3><span class="en ">Fact-checked, then reviewed</span><span class="zh ">先核实,再评审</span></h3>
+        <p><span class="en ">A multi-agent workflow fact-checked every plan claim against the live tree before building; each wave passed a build/test gate, was re-verified against the plan, and code-reviewed (0 CRITICAL / 0 HIGH).</span><span class="zh ">多 agent 工作流在动工前把每条计划论断对照真实代码核实;每个 Wave 都过 build/test 闸门、对照计划复验,并经 code-review(0 CRITICAL / 0 HIGH)。</span></p>
+        <p class="why"><span class="en ">Why: green CI ≠ correct. The plan's own assumptions were the first thing tested.</span><span class="zh ">为什么:CI 全绿 ≠ 正确。计划自身的假设是第一个被检验的对象。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">408 tests · 0 fail</span>
+      <span class="pill">review · 0 CRITICAL/HIGH</span>
+      <span class="pill">offline · 0 CDN</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-06-20:</b> merged to <code>main</code>; tag <code>v3.4.32</code> pushed → GitHub Release with <code>ar-warroom-v3.4.32.zip</code> attached for download. <i>npm publish + MCP-registry re-publish are tracked separately.</i></span><span class="zh "><b>2026-06-20 已发布：</b>合并入 <code>main</code>;推送 <code>v3.4.32</code> tag → GitHub Release 附带可下载的 <code>ar-warroom-v3.4.32.zip</code>。<i>npm 发布与 MCP registry 重新发布另行单独处理。</i></span></div>
+  </section>
+
+  <!-- v3.4.30 -->
+  <section class="hero">
+    <div class="hero-head">
+      <div class="tagrow">
+        <span class="vbadge">v3.4.30</span>
+        <span class="major"><span class="en ">★ Major release</span><span class="zh ">★ 重大版本</span></span>
+        <span class="date mono">2026-06-19</span>
+      </div>
+      <h2 class="hero-title"><span class="en ">Onboarding &amp; Distribution</span><span class="zh ">上手与分发</span></h2>
+      <p class="hero-lede"><span class="en ">The biggest non-code release yet — a ground-up rework of how people <b>discover, install, and run</b> AgentRecall, for humans and agents alike. Plus a real security fix folded in from the community.</span><span class="zh ">迄今最大的"非代码"版本 —— 从头重做了人与 agent <b>发现、安装、运行</b> AgentRecall 的整条路径，并合入了一个来自社区的真实安全修复。</span></p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <span class="ic">📖</span>
+        <h3><span class="en ">README, rewritten</span><span class="zh ">README 重写</span></h3>
+        <p><span class="en ">Root README cut <code>579 → 198 lines</code> — a scannable English landing page. The full reference is preserved verbatim as <code>README.full.md</code>.</span><span class="zh ">README 从 <code>579 → 198 行</code>，做成可快速浏览的英文落地页；完整版原样保留为 <code>README.full.md</code>。</span></p>
+        <p class="why"><span class="en ">Why: a landing page should convert in 30 seconds; the deep dive stays one click away.</span><span class="zh ">为什么：落地页要在 30 秒内打动人，深入内容留在一键之外。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🌐</span>
+        <h3><span class="en ">Bilingual docs</span><span class="zh ">双语文档</span></h3>
+        <p><span class="en ">New <code>README.zh-CN.md</code> mirror with a one-click <code>English · 中文</code> switch at the top of each file.</span><span class="zh ">新增 <code>README.zh-CN.md</code> 镜像，每个文件顶部一键切换 <code>English · 中文</code>。</span></p>
+        <p class="why"><span class="en ">Why: first-class Chinese onboarding, not an afterthought.</span><span class="zh ">为什么：让中文上手成为一等公民，而非事后补丁。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🖥️</span>
+        <h3><span class="en ">War Room in the repo — fully offline</span><span class="zh ">War Room 进仓库 — 完全离线</span></h3>
+        <p><span class="en ">The multi-page dashboard now lives at <code>warroom/</code>. ECharts, Cytoscape, 3 fonts and 8 brand icons are vendored — zero external requests.</span><span class="zh ">多页仪表盘进入仓库 <code>warroom/</code>；ECharts、Cytoscape、3 款字体和 8 个品牌图标全部本地化 —— 零外部请求。</span></p>
+        <p class="why"><span class="en ">Why: download → unzip → <code>python3 -m http.server</code> → open. No Node, no internet.</span><span class="zh ">为什么：下载 → 解压 → <code>python3 -m http.server</code> → 打开。无需 Node，无需联网。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">📦</span>
+        <h3><span class="en ">Release pipeline</span><span class="zh ">发布流水线</span></h3>
+        <p><span class="en "><code>release.yml</code> zips <code>warroom/</code> on every <code>v*</code> tag and attaches <code>ar-warroom-vX.Y.Z.zip</code> to a GitHub Release (tag via env var, actions SHA-pinned).</span><span class="zh "><code>release.yml</code> 在每个 <code>v*</code> tag 上打包 <code>warroom/</code>，把 <code>ar-warroom-vX.Y.Z.zip</code> 挂到 GitHub Release（tag 经环境变量传入，actions 锁定 SHA）。</span></p>
+        <p class="why"><span class="en ">Why: a versioned, downloadable dashboard for every release — recommended for Hermes / OpenClaw / OpenCode.</span><span class="zh ">为什么：每个版本都有可下载的离线面板 —— 推荐给 Hermes / OpenClaw / OpenCode 用户。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🧹</span>
+        <h3><span class="en ">Repo tidy</span><span class="zh ">仓库整理</span></h3>
+        <p><span class="en ">7 internal / QA folders (agent-prompts, eval, integrations, tests, wiki, workspace, scripts) consolidated under <code>meta/</code>.</span><span class="zh ">7 个内部 / QA 目录（agent-prompts、eval、integrations、tests、wiki、workspace、scripts）收进 <code>meta/</code>。</span></p>
+        <p class="why"><span class="en ">Why: the GitHub root now shows only meaningful folders — <code>.github · benchmark · commands · docs · packages · warroom · meta</code>.</span><span class="zh ">为什么：GitHub 根目录现在只剩有意义的文件夹 —— <code>.github · benchmark · commands · docs · packages · warroom · meta</code>。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">🔢</span>
+        <h3><span class="en ">Version sync</span><span class="zh ">版本统一</span></h3>
+        <p><span class="en "><code>3.4.27 → 3.4.30</code> everywhere: all 4 packages + internal deps + <code>types.ts</code> VERSION + SKILL.md + benchmark + codex-compat.</span><span class="zh "><code>3.4.27 → 3.4.30</code> 全量统一：4 个包 + 内部依赖 + <code>types.ts</code> VERSION + SKILL.md + benchmark + codex-compat。</span></p>
+        <p class="why"><span class="en ">Why: one consistent version, no drift between manifest, code, and docs.</span><span class="zh ">为什么：版本号在清单、代码、文档之间不再漂移。</span></p>
+      </div>
+      <div class="card flag">
+        <span class="ic">🔐</span>
+        <h3><span class="en ">Security fix — community PR #18</span><span class="zh ">安全修复 — 社区 PR #18</span></h3>
+        <p><span class="en ">Removed a hardcoded Supabase URL + anon key shipped as a default fallback in <code>awareness.ts</code>. It now gates on <code>readSupabaseConfig()</code> and returns nothing when unconfigured.</span><span class="zh ">删除 <code>awareness.ts</code> 中作为默认回退写死的 Supabase 地址与 anon key，改为先经 <code>readSupabaseConfig()</code> 判断，未配置时不返回任何内容。</span></p>
+        <p class="why"><span class="en ">Why: unconfigured users were silently reading from a baked-in backend. Thanks to @leirt97.</span><span class="zh ">为什么：未配置的用户此前会悄悄连到内置后端。感谢 @leirt97。</span></p>
+      </div>
+      <div class="card">
+        <span class="ic">✅</span>
+        <h3><span class="en ">Reviewed before shipping</span><span class="zh ">发布前评审</span></h3>
+        <p><span class="en ">A 5-agent round table reviewed the diff and caught 7 defects — including a shell-injection in the release workflow — all fixed before push.</span><span class="zh ">5 个 agent 组成圆桌评审 diff，发现 7 个缺陷 —— 包括发布工作流里的 shell 注入 —— 全部在推送前修复。</span></p>
+        <p class="why"><span class="en ">Why: green CI ≠ correct. Independent review catches what self-verification misses.</span><span class="zh ">为什么：CI 全绿 ≠ 正确。独立评审能抓到自检漏掉的问题。</span></p>
+      </div>
+    </div>
+    <div class="verify">
+      <span class="vlabel"><span class="en ">Verified</span><span class="zh ">已验证</span></span>
+      <span class="pill">build · 0 errors</span>
+      <span class="pill">consistency 10/10</span>
+      <span class="pill">funnel 18/18</span>
+      <span class="pill">heeded-guard 5/5</span>
+      <span class="pill">room-slug-guards 9/9</span>
+      <span class="pill">offline · 0 CDN</span>
+    </div>
+    <div class="shipped"><span class="en "><b>Shipped 2026-06-19:</b> PR #29 merged to <code>main</code>; all 4 packages published to npm <b>@3.4.30</b>; tag <code>v3.4.30</code> pushed → GitHub Release is Latest with <code>ar-warroom-v3.4.30.zip</code> attached.</span><span class="zh "><b>2026-06-19 已发布：</b>PR #29 合并入 <code>main</code>；4 个包均以 <b>@3.4.30</b> 发布到 npm；推送 <code>v3.4.30</code> tag → GitHub Release 成为 Latest 并附带 <code>ar-warroom-v3.4.30.zip</code>。</span></div>
+  </section>
+
+  <!-- PRIOR RELEASES (full) -->
+  <div class="sech"><span class="en ">Previous releases — in full</span><span class="zh ">此前版本 — 完整记录</span></div>
+  
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.27</span>
+      <h2 class="rel-title"><span class="en ">Reviewed naming + safety</span><span class="zh ">命名系统整理 + 安全加固（经 Orchestrator 评审通过）</span></h2>
+      <span class="date mono">2026-06-18</span>
+    </div>
+    <p class="rel-sum"><span class="en ">Bundles v3.4.26 safety patches with a comprehensive naming system cleanup, reviewed and approved (with one MEDIUM fix) by an Opus orchestrator. First release to follow the new governance model where the implementer stops at local commit and push/publish are human-only irreversibles.</span><span class="zh ">将 v3.4.26 安全补丁与命名系统全面清理打包发布，经 Opus Orchestrator 新鲜视角评审并 APPROVE（修复一个 MEDIUM 问题）。本次是首个严格遵循新治理模型的版本：实现者止步于本地提交，推送与发布由人工执行。</span></p>
+    <ul class="pts">
+      <li><span class="en ">Safety — session count fix: <code>journalDirs(includeArchive)</code> now defaults to <code>false</code>, preventing archived entries from inflating session counts; only recall paths access the archive.</span><span class="zh ">安全修复——会话计数：<code>journalDirs(includeArchive)</code> 默认改为 <code>false</code>，归档条目不再虚增会话数，只有 recall 路径会访问归档。</span></li>
+      <li><span class="en ">Safety — archive clobber fix in <code>compress.ts</code>: collision-proof naming via <code>Date.now()</code> suffix plus idempotency guard that skips entries already marked "consolidated", so running compress twice on the same day no longer overwrites the backup.</span><span class="zh ">安全修复——归档覆盖：<code>compress.ts</code> 对归档文件名追加 <code>Date.now()</code> 后缀，并跳过已标记为 "consolidated" 的条目，同日两次压缩不再覆盖备份，核心安全承诺得以恢复。</span></li>
+      <li><span class="en ">Safety — path injection: <code>sanitizeSlug()</code> + <code>assertInsideRoot()</code> added at the <code>compressTopic</code> entry point, blocking <code>../../evil</code> style room/topic paths from escaping the palace directory.</span><span class="zh ">安全修复——路径注入：在 <code>compressTopic</code> 入口处增加 <code>sanitizeSlug()</code> + <code>assertInsideRoot()</code>，阻止 <code>../../evil</code> 形式的 room/topic 路径逃逸 palace 目录。</span></li>
+      <li><span class="en ">Naming — slug gate: <code>isValidProjectSlug()</code> added to <code>resolveProject()</code> rejects UUIDs, <code>.md</code> suffixes, <code>_</code>/<code>.</code> prefixes, denylist words, and path traversal attempts; existing directories remain readable.</span><span class="zh ">命名——slug 门控：<code>resolveProject()</code> 中引入 <code>isValidProjectSlug()</code>，拒绝 UUID、<code>.md</code> 后缀、<code>_</code>/<code>.</code> 前缀、黑名单词及路径穿越；已有目录仍可正常读取。</span></li>
+      <li><span class="en ">Naming — journal filename format: all write paths (<code>journal_write</code> MCP, <code>ar write</code> CLI, <code>journal_capture</code>) now pass <code>saveType</code> to produce <code>{date}--{type}--{sig}--{theme}--{slug}.md</code> instead of the old <code>{date}.md</code>; old files remain readable.</span><span class="zh ">命名——日志文件名格式：所有写入路径（<code>journal_write</code> MCP、<code>ar write</code> CLI、<code>journal_capture</code>）现在均传入 <code>saveType</code>，生成 <code>{date}--{type}--{sig}--{theme}--{slug}.md</code> 格式文件名，替代旧版 <code>{date}.md</code>；旧文件仍可读。</span></li>
+      <li><span class="en ">Naming — new <code>scripts/clean-project-slugs.mjs</code> quarantine tool: dry-run by default, <code>--apply</code> quarantines invalid slugs to <code>_quarantine/</code>; idempotent. Reviewer MEDIUM fix also added dot-prefix check to <code>isValidProjectSlug</code> so <code>.DS_Store</code>/<code>.aam</code> are now rejected consistently.</span><span class="zh ">命名——新增 <code>scripts/clean-project-slugs.mjs</code> 清理工具：默认干跑，<code>--apply</code> 将无效 slug 隔离至 <code>_quarantine/</code>，操作幂等。同时修复 Reviewer 指出的 MEDIUM 问题：<code>isValidProjectSlug</code> 补充点前缀检查，<code>.DS_Store</code>/<code>.aam</code> 现可被一致拒绝。</span></li>
+    </ul>
+  </article>
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.26</span>
+      <h2 class="rel-title"><span class="en ">Post-review patch: compression safety + session count fixes</span><span class="zh ">事后审查补丁：压缩安全性与会话计数修复</span></h2>
+      <span class="date mono">2026-06-18</span>
+    </div>
+    <p class="rel-sum"><span class="en ">Three HIGH bugs caught by an independent orchestrator review of v3.4.25 — none caught by green test suites. The release fixes session count inflation, archive clobber on same-day re-runs, and an unsanitized path traversal vulnerability in <code>compress.ts</code>.</span><span class="zh ">通过独立 orchestrator 审查 v3.4.25 发现三个 HIGH 级 bug——均未被绿色测试套件捕获。本版本修复了会话计数虚高、同日重复运行覆盖归档备份，以及 <code>compress.ts</code> 中未做路径清洗的路径穿越漏洞。</span></p>
+    <ul class="pts">
+      <li><span class="en ">HIGH-1 — session count inflation: <code>journalDirs()</code> unconditionally included <code>archive/</code>, causing <code>listJournalFiles</code> to count archived entries as active sessions (e.g. 30 archived + 10 active = 40 displayed). Fixed by adding <code>journalDirs(project, includeArchive)</code> param, defaulting to <code>false</code> for counting paths and <code>true</code> only for recall, <code>readJournalFile</code>, <code>journalSearch</code>, and <code>contextSynthesize</code>.</span><span class="zh ">HIGH-1 — 会话计数虚高：<code>journalDirs()</code> 无条件包含 <code>archive/</code> 目录，导致 <code>listJournalFiles</code> 将已归档条目算作活跃会话（如 30 条归档 + 10 条活跃 = 显示 40）。修复方式：为 <code>journalDirs(project, includeArchive)</code> 新增参数，计数路径时默认 <code>false</code>，仅在 recall、<code>readJournalFile</code>、<code>journalSearch</code> 和 <code>contextSynthesize</code> 场景传 <code>true</code>。</span></li>
+      <li><span class="en ">HIGH-2 — archive clobber on same-day re-run: <code>compressTopic</code> used <code>${topic}-${today}.md</code> as the archive filename, so running it twice in one day silently overwrote the only backup of the originals. Fixed with collision-proof naming <code>${topic}-${today}-${Date.now()}.md</code>, a never-overwrite guard, and idempotency via <code>parseEntries</code> skipping entries already marked <code>(consolidated)</code>.</span><span class="zh ">HIGH-2 — 同日重复运行覆盖归档：<code>compressTopic</code> 使用 <code>${topic}-${today}.md</code> 命名归档文件，同一天执行两次会静默覆盖原始备份。修复方式：改用防碰撞命名 <code>${topic}-${today}-${Date.now()}.md</code>，加入禁止覆盖守卫，并通过 <code>parseEntries</code> 跳过已标记 <code>(consolidated)</code> 的条目实现幂等性。</span></li>
+      <li><span class="en ">HIGH-3 — unsanitized path traversal in <code>compress.ts</code>: raw <code>room</code>/<code>topic</code> values were passed directly to <code>path.join</code> without <code>sanitizeSlug()</code>, allowing inputs like <code>../../evil</code> to escape the palace directory. Fixed by calling <code>sanitizeSlug()</code> at entry point plus <code>assertInsideRoot</code> as defense-in-depth.</span><span class="zh ">HIGH-3 — <code>compress.ts</code> 路径穿越漏洞：<code>room</code>/<code>topic</code> 原始值未经 <code>sanitizeSlug()</code> 处理直接传入 <code>path.join</code>，形如 <code>../../evil</code> 的输入可逃逸 palace 目录。修复方式：入口处调用 <code>sanitizeSlug()</code>，并以 <code>assertInsideRoot</code> 作纵深防御。</span></li>
+      <li><span class="en ">MED — <code>_archive</code> traversal: <code>compressRoom</code> and <code>compressProject</code> could recurse into <code>_archive</code> subdirectories. Fixed by skipping any dirs or files whose names start with <code>_</code>.</span><span class="zh ">MED — <code>_archive</code> 目录遍历：<code>compressRoom</code> 和 <code>compressProject</code> 可能递归进入 <code>_archive</code> 子目录。修复方式：跳过所有名称以 <code>_</code> 开头的目录和文件。</span></li>
+      <li><span class="en ">Version hygiene sweep: <code>SKILL.md</code> updated from 3.4.22 → 3.4.26 (was three releases stale), <code>replay-benchmark.mjs</code> version stamp bumped to 3.4.26, and all four packages plus the <code>VERSION</code> constant aligned to 3.4.26.</span><span class="zh ">版本整理：<code>SKILL.md</code> 从 3.4.22 更新至 3.4.26（落后三个版本），<code>replay-benchmark.mjs</code> 版本戳更新为 3.4.26，全部四个包及 <code>VERSION</code> 常量统一至 3.4.26。</span></li>
+      <li><span class="en ">Process change: the implementer no longer runs <code>git push</code> or <code>npm publish</code>; the workflow stops at 'committed + logged, awaiting review.' All irreversible commands are reserved for the human after orchestrator sign-off. (Commit <code>4901ba6</code> on <code>fix/v3.4.26-compression-safety</code> — not pushed, not published at release time.)</span><span class="zh ">流程变更：实现者不再执行 <code>git push</code> 或 <code>npm publish</code>，工作流止步于「已提交 + 已记录，等待审查」。所有不可逆命令均由人类在 orchestrator 确认后执行。（提交 <code>4901ba6</code>，分支 <code>fix/v3.4.26-compression-safety</code>——发布时未推送、未发布。）</span></li>
+    </ul>
+  </article>
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.25</span>
+      <h2 class="rel-title"><span class="en ">Memory quality + trust integrity</span><span class="zh ">记忆质量与信任完整性</span></h2>
+      <span class="date mono">2026-06-18</span>
+    </div>
+    <p class="rel-sum"><span class="en ">v3.4.25 delivers two trust-integrity fixes (one P0 confirmed-not-broken with a regression guard, one P0 confirmed-and-fixed), a 4-metric replay benchmark that gates all quality work, and two memory-quality features: keystone importance signals and dream-cycle deduplication compression. 919 lines added, 43 new benchmark assertions, 9 suites all green.</span><span class="zh ">v3.4.25 包含两项信任完整性修复（一项 P0 确认未损坏并提交回归测试，一项 P0 确认存在并已修复）、一套作为所有质量工作门控的 4 指标回放基准，以及两项记忆质量特性：keystone 重要性信号与梦境周期去重压缩。共新增 919 行代码、43 条基准断言，9 个测试套件全部通过。</span></p>
+    <ul class="pts">
+      <li><span class="en ">P0-2 archive reachability fixed: <code>journalDirs()</code> in <code>packages/core/src/storage/paths.ts</code> was returning only the top-level <code>journal/</code> directory, silently dropping all rollup-archived entries from <code>smartRecall</code> and backlink resolution. A 3-line fix adds <code>journal/archive/</code> when it exists, restoring coverage across all downstream readers — score improved from 6/10 to 10/10.</span><span class="zh ">P0-2 归档可达性已修复：<code>packages/core/src/storage/paths.ts</code> 中的 <code>journalDirs()</code> 此前只返回顶层 <code>journal/</code> 目录，导致所有经 rollup 归档的条目在 <code>smartRecall</code> 和反向链接解析中静默消失。三行修复在目录存在时将 <code>journal/archive/</code> 纳入返回值，所有下游读取器自动受益——测试得分从 6/10 恢复至 10/10。</span></li>
+      <li><span class="en ">P0-1 incremental-write visibility investigated and confirmed NOT broken in v3.4.24: all 4 write routes (<code>palace_write</code>, <code>journal_capture</code>, <code>knowledge_write</code>, <code>awareness_update</code>) correctly surface to <code>session_start</code>. The one apparent failure was a test artifact — the quality gate rejecting awareness insights with a title shorter than 3 words. Committed as 11-assertion regression guard in <code>benchmark/p0-1-incremental-visibility.mjs</code>.</span><span class="zh ">P0-1 增量写入可见性经调查确认在 v3.4.24 中并未损坏：四条写入路径（<code>palace_write</code>、<code>journal_capture</code>、<code>knowledge_write</code>、<code>awareness_update</code>）均能在 <code>session_start</code> 时正确呈现。唯一的表面失败是测试构造问题——质量门控拒绝了标题不足 3 个词的 awareness insight。已以 11 条断言的回归测试形式提交至 <code>benchmark/p0-1-incremental-visibility.mjs</code>。</span></li>
+      <li><span class="en ">Section 5 replay benchmark introduced: <code>benchmark/replay-benchmark.mjs</code> replays 3 synthetic sessions (architecture decisions, a correction, and noise) then runs measurement queries at session 4, producing a 4-metric scorecard (recall, precision, staleness, correction-correctness). Baseline: 100%/33%/100%/100%. Precision at 33% quantifies the compression target; the benchmark gates all P1 work going forward.</span><span class="zh ">新增第 5 节回放基准：<code>benchmark/replay-benchmark.mjs</code> 回放 3 个合成会话（架构决策、纠错、噪声），然后在第 4 个会话执行测量查询，产出 4 指标评分卡（召回率、精确率、过时率、纠错正确率）。基线为 100%/33%/100%/100%。精确率 33% 量化了压缩目标；该基准作为后续所有 P1 工作的门控条件。</span></li>
+      <li><span class="en ">P1-2 keystone importance signal: memories referenced from pipeline milestone 'How solved' or 'Synthesis' sections are marked <code>keystone: true</code> in <code>RoomMeta</code>, their importance is forced to 'high', and a salience floor of 0.30 is applied — well above the archive threshold of 0.15 — independent of access count or edge count. Addresses the rich-get-richer failure where rare but critical architecture decisions sank below frequently-touched trivia because frequency signals held 45% salience weight vs. 10% for self-reported importance. New files: <code>packages/core/src/palace/keystone.ts</code>, salience changes in <code>palace/salience.ts</code>.</span><span class="zh ">P1-2 keystone 重要性信号：凡是在 pipeline 里程碑 'How solved' 或 'Synthesis' 章节中被引用的记忆，其 <code>RoomMeta.keystone</code> 被标记为 <code>true</code>，重要性强制置为 'high'，显著度下限设为 0.30（远高于归档阈值 0.15），不受访问次数或边数影响。此举解决了富者愈富问题——原先频率信号占显著度权重的 45%，自报重要性仅占 10%，导致罕见但关键的架构决策显著度低于频繁访问的琐碎条目。新增文件：<code>packages/core/src/palace/keystone.ts</code>，并修改了 <code>palace/salience.ts</code>。</span></li>
+      <li><span class="en ">P1-1 dream-cycle compression: <code>packages/core/src/palace/compress.ts</code> (230 lines) clusters near-duplicate palace entries by keyword overlap &gt;= 0.6, collapses them to a canonical entry that unions all source backlinks, and archives originals to <code>rooms/&lt;room&gt;/_archive/</code> — raw memories are never destroyed. Exposes <code>compressTopic</code>, <code>compressRoom</code>, and <code>compressProject</code> with dry-run support. Reduces spurious attractor formation in the Hopfield retrieval layer by lowering stored-memory count without sacrificing recall.</span><span class="zh ">P1-1 梦境周期压缩：<code>packages/core/src/palace/compress.ts</code>（230 行）按关键词重叠度 &gt;= 0.6 对近重复的 palace 条目进行聚类，合并为合并所有来源反向链接的规范条目，原始条目归档至 <code>rooms/&lt;room&gt;/_archive/</code>（原始记忆永不销毁）。对外暴露 <code>compressTopic</code>、<code>compressRoom</code>、<code>compressProject</code>，均支持 dry-run 模式。通过降低存储条目数减少 Hopfield 检索层中的伪吸引子，同时不损失召回率。</span></li>
+      <li><span class="en ">Zero-break migration: <code>RoomMeta.keystone</code> is optional (defaults to undefined/falsy for existing rooms); <code>KEYSTONE_FLOOR</code> is exported from <code>palace/salience.ts</code>; <code>compressTopic/compressRoom/compressProject</code> are additive exports; <code>journalDirs()</code> returning <code>archive/</code> is backward-compatible because all readers already handle multiple directories.</span><span class="zh ">零破坏性迁移：<code>RoomMeta.keystone</code> 为可选字段（现有 room 默认为 undefined/falsy）；<code>KEYSTONE_FLOOR</code> 从 <code>palace/salience.ts</code> 导出；<code>compressTopic/compressRoom/compressProject</code> 均为增量导出；<code>journalDirs()</code> 返回 <code>archive/</code> 向后兼容，因为所有读取器本已支持多目录遍历。</span></li>
+    </ul>
+  </article>
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.23</span>
+      <h2 class="rel-title"><span class="en ">Memory as Environment — V4 full execution</span><span class="zh ">Memory as Environment — V4 全量落地</span></h2>
+      <span class="date mono">2026-06-12</span>
+    </div>
+    <p class="rel-sum"><span class="en ">Ships the entire V4 "Memory as Environment" execution (perf-check P0s + Sprints 0-2) as one patch release per no-version-inflation policy, publishing agent-recall-{core,mcp,sdk,cli}@3.4.23. All test suites pass: consistency 10/10, funnel 18/18.</span><span class="zh ">按不膨胀版本号策略，将 V4 "Memory as Environment" 的全部执行成果（性能检查 P0 项 + Sprint 0-2）打包为单个补丁发布，同步发布 agent-recall-{core,mcp,sdk,cli}@3.4.23。所有测试套件通过：consistency 10/10，funnel 18/18。</span></p>
+    <ul class="pts">
+      <li><span class="en ">Recall latency cut from 10.5s worst-case to 2.5s, then to milliseconds after circuit breaker fires — achieved via a 2s embed timeout, parallel local fallback, and an honest <code>degraded</code> field surfaced to callers.</span><span class="zh ">召回延迟从最坏情况 10.5s 降至 2.5s，熔断器触发后进一步降至毫秒级——通过 2s embed 超时、并行本地降级回退以及向调用方暴露真实的 <code>degraded</code> 字段实现。</span></li>
+      <li><span class="en ">Learning loop made fully automatic: <code>retrieved</code> outcome event fires at session_start (once per day, local-TZ), <code>heeded</code>/<code>recurred</code> heuristics fire at session_end — delivering the first KPI data in product history.</span><span class="zh ">学习循环完全自动化：<code>retrieved</code> 结果事件在 session_start 触发（每日一次，按本地时区），<code>heeded</code>/<code>recurred</code> 启发式在 session_end 触发——产品史上首次产生真实 KPI 数据。</span></li>
+      <li><span class="en ">North-star alignment line added: an N% corrections-heeded metric appears at the top of session_start and as <code>alignment_precision</code> on the dashboard; field is null until real data exists — no fabricated claims.</span><span class="zh ">新增北极星对齐指示线：N% 修正采纳率指标显示在 session_start 顶部，并作为 <code>alignment_precision</code> 出现在 dashboard；字段在积累到真实数据前保持 null，不虚报。</span></li>
+      <li><span class="en ">Insight funnel unblocked with confirm-first logic: near-duplicates with containment ≥ 0.6 now trigger CONFIRM instead of re-add; cap eviction protects entries with count ≥ 2. Validated by benchmark/funnel.mjs 18/18.</span><span class="zh ">洞察漏斗通过「先确认」逻辑疏通：包含度 ≥ 0.6 的近似重复项现在触发 CONFIRM 而非重复添加；容量淘汰机制保护 count ≥ 2 的条目。经 benchmark/funnel.mjs 18/18 验证。</span></li>
+      <li><span class="en ">Correction hygiene tightened: <code>retractCorrection</code> added, a write-time quality gate with rule-only classification (11/11 calibration) gates new writes, and 64/81 legacy noise corrections were retracted reversibly via triage script.</span><span class="zh ">修正质量管控加强：新增 <code>retractCorrection</code>，写入时质量门禁采用纯规则分类（11/11 校准），历史噪声修正中的 64/81 条通过 triage 脚本可逆地撤回。</span></li>
+      <li><span class="en ">Default MCP tool surface reduced from 18 to 5 (session_start, session_end, remember, recall, check) per Automaticity Law; the remaining 13 pull tools are now behind <code>--full</code>. Auto-generated projects/&lt;slug&gt;/handoff.md at every session_end (≤ 2200 chars) provides cross-agent briefing; a doubled "Intention:" prefix cosmetic bug was fixed in this release.</span><span class="zh ">默认 MCP 工具数量按自动化定律从 18 缩减至 5（session_start、session_end、remember、recall、check），其余 13 个拉取工具移至 <code>--full</code> 模式。每次 session_end 自动生成 projects/&lt;slug&gt;/handoff.md（≤ 2200 字符）供跨 agent 交接；本版本同步修复了双写「Intention:」前缀的外观 bug。</span></li>
+    </ul>
+  </article>
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.22</span>
+      <h2 class="rel-title"><span class="en ">Trust: P0 Consistency Fixes</span><span class="zh ">Trust：P0 一致性修复</span></h2>
+      <span class="date mono">2026-06-11</span>
+    </div>
+    <p class="rel-sum"><span class="en ">v3.4.22 "Trust" was triggered by a live external evaluation (Claude agent, raw stdio JSON-RPC, clean Linux sandbox) that reproduced four trust-breaking bugs. The release freezes all new features and restores the core invariant: anything saved must be acknowledged as existing at orientation time, 100% deterministically.</span><span class="zh ">v3.4.22 "Trust" 由一次外部真实评估（Claude agent、原始 stdio JSON-RPC、干净 Linux 沙箱）触发，现场复现了四个破坏信任的 bug。本版本冻结所有新功能，专注恢复核心不变式：任何已保存的内容必须在 orientation 时被 100% 确定性地识别为存在。</span></p>
+    <ul class="pts">
+      <li><span class="en ">P0-1: session_start returned "No memory found" despite 4 writes on disk — isEmpty only keyed on session_end artifacts and ignored palace content and CLI capture logs. Fixed by folding in hasCaptures (capture-log scan) and hasPalaceContent (countRoomEntries &gt; 0); added a recent_captures field to surface uncommitted captures. Files: session-start.ts, journal-files.ts, project-status.ts.</span><span class="zh ">P0-1：磁盘已有 4 条写入，session_start 却返回 No memory found——isEmpty 只依赖 session_end 产物，完全忽略 palace 内容和 CLI capture log。修复：将 hasCaptures（扫描 capture log）和 hasPalaceContent（countRoomEntries &gt; 0）纳入判断，并新增 recent_captures 字段展示未提交的捕获内容。涉及文件：session-start.ts、journal-files.ts、project-status.ts。</span></li>
+      <li><span class="en ">P0-2: Empty default rooms (salience 0.5) outranked content rooms (0.41) and memory_count was stuck at 0 — default writes land in README.md but memory_count only counted non-README files; the 0.5 default beat computed fresh-room salience. Fixed: countRoomEntries() now counts ### entry blocks as disk truth; a hard invariant in the listRooms comparator ensures content rooms always sort above empty ones (not emergent from the formula); empty-room salience floored at 0; --importance high propagates into the salience calc. Files: rooms.ts, index-manager.ts, palace-write.ts.</span><span class="zh ">P0-2：空默认 room（salience 0.5）排名高于有内容的 room（0.41），且 memory_count 始终为 0——默认写入落在 README.md，但统计却排除 README 文件；0.5 默认值高于新鲜 room 的计算 salience。修复：countRoomEntries() 以 ### 条目块作为磁盘真相；在 listRooms 比较器中写入硬不变式（有内容的 room 必须排在空 room 之前，不依赖公式涌现）；空 room 的 salience 下限归零；--importance high 传入 salience 计算。涉及文件：rooms.ts、index-manager.ts、palace-write.ts。</span></li>
+      <li><span class="en ">P0-3: Session-1 insight was invisible at session-2 — global awareness only receives an insight after promoteConfirmedInsights fires (confirmed_count &gt;= 3), so a count-1 insight lived only in the project-scoped index and was never rendered. Fixed by merging project-scoped index insights with an independent budget (up to 2 reserved slots on top of awareness top-3), so a fresh insight surfaces even when awareness is full. Threshold now controls order/verbosity, never existence. File: session-start.ts.</span><span class="zh ">P0-3：第 1 个 session 写入的 insight 在第 2 个 session 不可见——全局 awareness 只在 promoteConfirmedInsights 触发后（confirmed_count &gt;= 3）才接收 insight，count 为 1 的 insight 仅存于项目级索引，从不渲染。修复：将项目级索引 insights 以独立预算（awareness top-3 之外额外预留最多 2 个槽位）合并到渲染结果，即使 awareness 已满，新鲜 insight 也能浮出。阈值现在只控制顺序与详略，不再决定存在与否。涉及文件：session-start.ts。</span></li>
+      <li><span class="en ">P0-4: A promotional trailer appeared in every session_start response — "Community: https://t.me/..." was embedded in formatTerse. Removed from all tool output (acceptable only in ar --help, README, and postinstall). A regression test now asserts no t.me/Telegram URL appears in the payload. File: mcp-server/.../session-start.ts.</span><span class="zh ">P0-4：每次 session_start 响应中都携带推广尾缀（Community: https://t.me/...）——该内容硬编码在 formatTerse 中。已从所有工具输出中移除（仅允许出现在 ar --help、README 和 postinstall 中）。新增回归测试断言 payload 中不含 t.me/Telegram URL。涉及文件：mcp-server/.../session-start.ts。</span></li>
+      <li><span class="en ">Two HIGH bugs were caught by the fresh-eyes code-reviewer that the workers' happy-path suite missed: HIGH-1 — named-topic first write (palace write &lt;room&gt; --topic X) omitted the ### entry header, causing countRoomEntries to see 0 and the room to sort as empty; HIGH-2 — the P0-3 fix was a no-op for established projects because the shared 3-cap filled from awareness before the project-index merge loop ran, corrected with the independent 2-slot project budget. A MEDIUM fix collapsed duplicate listRooms calls and wrapped updatePalaceIndex in withLock to prevent concurrent-write memory_count loss.</span><span class="zh ">无先验上下文的 code-reviewer 发现了 2 个 happy-path 套件结构性无法发现的 HIGH 级 bug：HIGH-1——命名 topic 首次写入（palace write &lt;room&gt; --topic X）缺少 ### 条目头，导致 countRoomEntries 返回 0，该 room 被排序为空；HIGH-2——P0-3 的修复对已有项目无效，因为共享 3-cap 在项目索引合并循环运行前就被 awareness 填满，通过独立 2-slot 项目预算修正。一个 MEDIUM 级修复合并了重复的 listRooms 调用，并将 updatePalaceIndex 包裹在 withLock 中，防止并发写入导致 memory_count 丢失。</span></li>
+      <li><span class="en ">benchmark/consistency.mjs was added as a permanent regression guard — it replays the exact live-eval sequence plus the two reviewer HIGH cases (10/10 assertions pass; exits 1 on any regression). The multi-agent process (orchestrator + 2 parallel file-disjoint workers + fresh-eyes code-reviewer + consistency verifier) is recorded for reuse; the reviewer finding 2 HIGH bugs the workers missed validated the never-self-review rule.</span><span class="zh ">新增 benchmark/consistency.mjs 作为永久回归守卫——完整回放真实评估序列及两个 reviewer HIGH 用例（10/10 断言通过；任意回归则 exit 1 退出）。所用多 agent 流程（orchestrator + 2 个并行文件不重叠 worker + 无上下文 code-reviewer + 一致性 verifier）已记录以备复用；reviewer 发现了 worker 结构性无法发现的 2 个 HIGH bug，验证了「永不自审」原则。</span></li>
+    </ul>
+  </article>
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.21</span>
+      <h2 class="rel-title"><span class="en ">Real-usage feedback pass — routing, proactive recall, behavior rules</span><span class="zh ">真实使用反馈专项修复——路由、主动召回与行为规则</span></h2>
+      <span class="date mono">2026-06-03</span>
+    </div>
+    <p class="rel-sum"><span class="en ">A 7-item patch distilled from a 4-hour high-intensity agent session on <code>prismma-gateway</code>, shipping two new MCP tools (<code>check_action</code>, <code>register_rule</code>), a wrong-project routing fix, a dream-cron failure banner, and a startup-noise cap. No breaking changes; all additions are backward-compatible.</span><span class="zh ">本版本从 <code>prismma-gateway</code> 项目的四小时高强度 Agent 会话中提炼出 7 项具体修复，新增两个 MCP 工具（<code>check_action</code>、<code>register_rule</code>），解决了项目路由误判、Dream 定时任务静默失败、以及启动信息过多等问题，完全向后兼容。</span></p>
+    <ul class="pts">
+      <li><span class="en ">Wrong-project routing fixed via <code>cwd-allowlist.json</code> per project and a cwd-aware <code>detectProject()</code> priority — previously <code>~/Projects/prismma-web</code> would load <code>prismma</code> instead of <code>prismma-gateway</code>. Auto-registers on explicit <code>resolveProject()</code>; macOS symlink-safe via <code>fs.realpathSync</code>. (commit <code>2b008c6</code>)</span><span class="zh ">新增每项目 <code>cwd-allowlist.json</code> 与 cwd 感知的 <code>detectProject()</code> 优先级，修复了从 <code>~/Projects/prismma-web</code> 启动时错误加载 <code>prismma</code> 而非 <code>prismma-gateway</code> 的路由问题。显式调用 <code>resolveProject()</code> 时自动注册；通过 <code>fs.realpathSync</code> 兼容 macOS 符号链接。（commit <code>2b008c6</code>）</span></li>
+      <li><span class="en ">Dream-cron failure banner: new <code>getDreamHealth()</code> walks the last 7 nights of <code>~/.aam/dreams/run-*.log</code> and surfaces a <code>🔴</code> red banner at the top of <code>session_start</code> output when ≥2 consecutive failure nights are detected — previously these failures were silent. (commit <code>6c0fe86</code>)</span><span class="zh ">新增 Dream 定时任务失败横幅：<code>getDreamHealth()</code> 扫描 <code>~/.aam/dreams/run-*.log</code> 最近 7 晚记录，若连续失败 ≥2 晚则在 <code>session_start</code> 顶部显示 <code>🔴</code> 红色警告，彻底消除此前的静默失败问题。（commit <code>6c0fe86</code>）</span></li>
+      <li><span class="en ">New MCP tool <code>check_action({ action_description })</code> — pre-action proactive matcher returning matching behavior rules, active corrections (P0-first), and high-salience insights for the upcoming action. Default <code>min_overlap=2</code> signal floor; deterministic and &lt;50 ms. Replaces tautological "P0 correction — follow strictly" reminders with concrete, context-matched guidance. (commit <code>5818510</code>)</span><span class="zh ">新增 MCP 工具 <code>check_action({ action_description })</code>：动作前主动匹配器，返回匹配的行为规则、活跃纠错（P0 优先）与高显著度洞察。默认信号阈值 <code>min_overlap=2</code>，确定性执行且耗时 &lt;50 ms，用具体提示取代了原本空洞的「P0 纠错——严格遵守」提示。（commit <code>5818510</code>）</span></li>
+      <li><span class="en ">New MCP tool <code>register_rule({ name, when, do })</code> backed by <code>palace/behavior-policies.json</code> — permanent IF-THEN behavior commitments always surfaced above insights and rooms in <code>session_start</code>. A hit-counter increments on every load, tracking how often each rule fires. (commit <code>eff348e</code>)</span><span class="zh ">新增 MCP 工具 <code>register_rule({ name, when, do })</code>，规则持久化存储于 <code>palace/behavior-policies.json</code>。每次 <code>session_start</code> 均将行为承诺置于洞察和 Palace 房间之前展示，且每次加载时命中计数器自动递增。（commit <code>eff348e</code>）</span></li>
+      <li><span class="en ">Startup noise cap: <code>session_start</code> now surfaces top 3 awareness insights (down from 8), top 1 cross-project insight (down from 5), and top 3 palace rooms (down from 5). Behavior rules are deliberately NOT capped — they are commitments, not context. (commit <code>eff348e</code>)</span><span class="zh ">启动信息降噪：<code>session_start</code> 现在只展示 top 3 意识洞察（原为 8 条）、top 1 跨项目洞察（原为 5 条）、top 3 Palace 房间（原为 5 条）。行为规则刻意不受限制——它们是承诺，不是上下文。（commit <code>eff348e</code>）</span></li>
+      <li><span class="en "><code>ar-sync-status.py &lt;slug&gt;</code> no longer prints the project picker in single-slug mode — silent invocations only write <code>status.json</code>, eliminating spurious output during automated runs. Shipped in the <code>~/.claude</code> repo via auto-sync rather than the main AgentRecall packages.</span><span class="zh "><code>ar-sync-status.py &lt;slug&gt;</code> 单 slug 调用模式下不再打印项目选择界面，静默执行仅写入 <code>status.json</code>，消除了自动化运行时的多余输出。该修复通过 <code>~/.claude</code> 仓库自动同步发布，不在主包内。</span></li>
+    </ul>
+  </article>
+  <article class="rel-card">
+    <div class="rel-head">
+      <span class="vbadge sm">v3.4.20</span>
+      <h2 class="rel-title"><span class="en ">Phase 6 foundations + critical audit fixes</span><span class="zh ">Phase 6 架构基础 + 关键审计修复</span></h2>
+      <span class="date mono">2026-06-01</span>
+    </div>
+    <p class="rel-sum"><span class="en ">v3.4.20 ships the full Phase 6 architectural pass — a 5-layer memory model, Modern Hopfield re-ranker primitive, FSRS-lite decay scoring, 12 new MCP tools, and a bilingual README rewrite — together with five post-audit P0 fixes covering data-loss in <code>/arsaveall</code>, path traversal in <code>paths.ts</code>, frontmatter YAML injection, and prompt-injection scrubbing in <code>/arbootstrap</code>.</span><span class="zh ">v3.4.20 完整落地 Phase 6 架构改造——5 层记忆模型、Modern Hopfield 重排序原语、FSRS-lite 衰减评分、12 个新 MCP 工具以及双语 README 重写——同时修复了审计后发现的 5 个 P0 问题，涵盖 <code>/arsaveall</code> 数据丢失、<code>paths.ts</code> 路径穿越、frontmatter YAML 注入以及 <code>/arbootstrap</code> 的提示注入清洗。</span></p>
+    <ul class="pts">
+      <li><span class="en ">5-layer memory model: added a **procedural** layer stored at <code>palace/skills/</code>, alongside the existing four layers; canonical path grammar <code>&lt;scope&gt;/&lt;type&gt;/[&lt;topic&gt;/]&lt;temporal&gt;--&lt;slug&gt;.md</code> introduced with a <code>legacy_path</code> virtual-key view so no migration was needed for existing entries.</span><span class="zh ">记忆模型扩展为 5 层：新增存储于 <code>palace/skills/</code> 的 **procedural**（程序性）层；引入规范路径语法 <code>&lt;scope&gt;/&lt;type&gt;/[&lt;topic&gt;/]&lt;temporal&gt;--&lt;slug&gt;.md</code>，并以 <code>legacy_path</code> 虚拟键视图兼容旧路径，无需迁移现有数据。</span></li>
+      <li><span class="en ">**Modern Hopfield** re-ranker primitive (Ramsauer 2020, formula ξ_new = X·softmax(β·X^⊤·ξ), capacity exp(d/2)) and **FSRS-lite** decay scorer (R = exp(-t/S), reinforce/penalize with Anki ≥23.10 grounding) added as research-driven foundations; Hopfield is unwired pending 3 prereqs, scheduled as Phase 7 wire-up candidates.</span><span class="zh ">新增 **Modern Hopfield** 重排序原语（Ramsauer 2020，公式 ξ_new = X·softmax(β·X^⊤·ξ)，容量 exp(d/2)）和 **FSRS-lite** 衰减评分器（R = exp(-t/S)，以 Anki ≥23.10 为基准），作为研究驱动的基础实现；Hopfield 暂未接入，等待 3 个前置条件，列入 Phase 7 候选。</span></li>
+      <li><span class="en ">12 new MCP tools shipped: <code>pipeline_open/close/list/current/show</code>, <code>skill_write/recall/list</code>, <code>dashboard_export</code>, <code>session_end_reflect</code>, and <code>session_start mode: lite</code> extension (~140 tokens vs ~1,800 full); feedback KPIs now track <code>retrieved_count</code> / <code>heeded_count</code> / <code>recurrence_count</code> / <code>precision</code> via <code>getCorrectionKPIs()</code> with noise/high-signal buckets.</span><span class="zh ">新增 12 个 MCP 工具：<code>pipeline_open/close/list/current/show</code>、<code>skill_write/recall/list</code>、<code>dashboard_export</code>、<code>session_end_reflect</code>、以及 <code>session_start mode: lite</code> 扩展（约 140 token 对比完整模式约 1800 token）；反馈 KPI 新增 <code>retrieved_count</code> / <code>heeded_count</code> / <code>recurrence_count</code> / <code>precision</code> 字段，通过 <code>getCorrectionKPIs()</code> 聚合并区分噪声/高信号桶。</span></li>
+      <li><span class="en "><code>/arsaveall</code> data-loss fix: bypassed the SAME-DAY dedup rule that caused parallel sessions to collapse onto one file; added per-call 6-hex suffix; removed <code>alreadyJournaled</code> skip in the CLI; unknown-project key now uses <code>sessionId</code> instead of the minute-window to prevent clobbering.</span><span class="zh ">修复 <code>/arsaveall</code> 数据丢失：跳过了导致并行会话写入同一文件的 SAME-DAY 去重规则；每次调用添加 6 位十六进制后缀；移除 CLI 中的 <code>alreadyJournaled</code> 跳过逻辑；未知项目键改用 <code>sessionId</code> 而非分钟窗口，避免覆盖写入。</span></li>
+      <li><span class="en ">Security hardening across three areas: <code>paths.ts</code> sanitizer blocks path traversal (no dots, separator-prefix check, symlink guard on milestone writes); frontmatter YAML now escaped with <code>quoteScalar</code> + atomic writes (tmp+rename) + line-walk section parser; <code>/arbootstrap</code> adds <code>SYSTEM_DIR_DENYLIST</code> (Downloads, Projects, Code, <code>.paperclip-instances-*</code>, UUIDs, etc.) and <code>scrubPromptInjection()</code> stripping <code>&lt;system-reminder&gt;</code> / <code>&lt;|im_start|&gt;</code> / "ignore previous instructions" / bidi / NULL at 3 import sites.</span><span class="zh ">三个方向的安全加固：<code>paths.ts</code> 净化器拦截路径穿越（禁点号、分隔符前缀检查、milestone 写入时的符号链接守卫）；frontmatter YAML 改用 <code>quoteScalar</code> 转义 + 原子写入（tmp+rename）+ 逐行段落解析器；<code>/arbootstrap</code> 新增 <code>SYSTEM_DIR_DENYLIST</code>（Downloads、Projects、Code、<code>.paperclip-instances-*</code>、UUID 等）和 <code>scrubPromptInjection()</code>，在 3 处导入点清除 <code>&lt;system-reminder&gt;</code> / <code>&lt;|im_start|&gt;</code> / "ignore previous instructions" / 双向字符 / NULL。</span></li>
+      <li><span class="en ">Internal dependency pin corrected: <code>agent-recall-core</code> dep in <code>mcp/sdk/cli</code> packages was stuck at 3.4.18; bumped to 3.4.20 so fresh installs resolve consistently. The <code>VERSION</code> constant in <code>core/src/types.ts</code> was likewise stale at 3.4.18 and is now 3.4.20. README rewritten bilingual EN/ZH (1175 → 567 lines) with 18-tool badge, 5-layer model section, Phase 6 features, and math citations.</span><span class="zh ">修正内部依赖钉版：<code>mcp/sdk/cli</code> 包中的 <code>agent-recall-core</code> 依赖停留在 3.4.18，已统一提升至 3.4.20，确保全新安装版本一致；<code>core/src/types.ts</code> 中同样滞后的 <code>VERSION</code> 常量也已更新。README 重写为中英双语（1175 → 567 行），新增 18 工具徽章、5 层模型章节、Phase 6 特性说明及数学引用。</span></li>
+    </ul>
+  </article>
+
+  <footer>
+    <span class="en ">Part of the</span><span class="zh ">隶属于</span> <a href="https://github.com/Goldentrii/AgentRecall-MCP">AgentRecall</a> <span class="en ">project · full reasoning lives in</span><span class="zh ">项目 · 完整设计推理见</span> <code>UPDATE-LOG.md</code>
+  </footer>
+
+</div>
+<script>
+  (function(){
+    var root=document.documentElement, bar=document.getElementById('lang');
+    function set(l){root.setAttribute('data-lang',l);try{localStorage.setItem('ar-changelog-lang',l);}catch(e){}
+      bar.querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-set')===l);});}
+    var saved='en';try{saved=localStorage.getItem('ar-changelog-lang')||'en';}catch(e){}
+    set(saved);
+    bar.addEventListener('click',function(e){var b=e.target.closest('button');if(b)set(b.getAttribute('data-set'));});
+  })();
+</script>
+</body>
+</html>

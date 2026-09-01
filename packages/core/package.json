@@ -1,6 +1,6 @@
 {
   "name": "agent-recall-core",
-  "version": "3.4.23",
+  "version": "3.4.47",
   "description": "Core memory palace engine for AgentRecall",
   "type": "module",
   "main": "dist/index.js",
@@ -25,6 +25,14 @@
     "memory-palace",
     "agent-memory",
     "mcp",
+    "mcp-server",
+    "persistent-memory",
+    "correction-tracking",
+    "claude-code",
+    "claude-mcp",
+    "agent-learning",
+    "session-memory",
+    "compounding-memory",
     "langchain",
     "crewai",
     "knowledge-graph",
@@ -44,7 +52,8 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Goldentrii/AgentRecall.git",
+    "url": "git+https://github.com/Goldentrii/AgentRecall-X.git",
     "directory": "packages/core"
-  }
+  },
+  "homepage": "https://github.com/Goldentrii/AgentRecall-X#readme"
 }

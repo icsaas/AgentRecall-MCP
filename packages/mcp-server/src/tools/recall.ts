@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { smartRecall, type SmartRecallResultItem } from "agent-recall-core";
+import { smartRecall, fenceMemory, type SmartRecallResultItem } from "agent-recall-core";
 
 /** Truncate to n chars with ellipsis */
 function trunc(s: string, n: number): string {
@@ -22,7 +22,7 @@ function formatResults(items: SmartRecallResultItem[]): string {
 export function register(server: McpServer): void {
   server.registerTool("recall", {
     title: "Recall",
-    description: "Use when the user asks to recall, search, find, or look up previous memory, context, or decisions.",
+    description: "[RETRIEVE — use freely, any time] Use when the user asks to recall, search, find, or look up previous memory, context, or decisions.",
     inputSchema: {
       query: z.string().describe("What to search for."),
       project: z.string().default("auto"),
@@ -45,7 +45,22 @@ export function register(server: McpServer): void {
         return { content: [{ type: "text" as const, text: `No results for "${query}". Sources searched: ${result.sources_queried.join(", ")}` }] };
       }
 
-      const lines: string[] = [formatResults(result.results)];
+      // P1 fence (TOW2-388): the retrieved results + verbatim drill-down are
+      // stored/retrieved memory content — fence as ONE block. The trailing
+      // feedback-rating footer below is AgentRecall's own tool-usage
+      // guidance (not retrieved data) and stays outside the fence.
+      const memoryLines: string[] = [formatResults(result.results)];
+
+      // Bridge (Wave 4): low-confidence top hits drilled into the lossless archive.
+      if (result.bridged && result.bridged.length > 0) {
+        memoryLines.push("");
+        memoryLines.push("— Verbatim source (low-confidence drill-down):");
+        for (const b of result.bridged) {
+          memoryLines.push(`  [${b.source}] ${trunc(b.verbatim.replace(/\n/g, " "), 300)}`);
+        }
+      }
+
+      const lines: string[] = [fenceMemory(memoryLines.join("\n"))];
 
       // Feedback nudge — show IDs so agents can easily rate on next call
       lines.push("");

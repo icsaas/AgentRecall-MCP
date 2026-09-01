@@ -1,11 +1,15 @@
 // packages/core/src/supabase/sync.ts
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { getSupabaseClient } from "./client.js";
 import { readSupabaseConfig } from "./config.js";
 import { createEmbeddingProvider, type EmbeddingProvider } from "./embedding.js";
+import { classifyStore } from "../storage/classification.js";
+import { scrubForCloud } from "../storage/content-guard.js";
+import { exportCorrections } from "../tools-logic/export-corrections.js";
+import { getRoot } from "../types.js";
+import { readTierCandidates } from "../retrieval/candidates.js";
 
 // ---------------------------------------------------------------------------
 // Utilities (exported for testing)
@@ -74,7 +78,18 @@ export function deriveSlug(filePath: string): string {
 // ---------------------------------------------------------------------------
 
 export function logSyncError(message: string): void {
-  const logPath = path.join(os.homedir(), ".agent-recall", "sync-errors.log");
+  // Root-fix (2026-07-31, continuity wave F5): this used to hardcode
+  // os.homedir() directly, bypassing getRoot()'s AGENT_RECALL_ROOT/setRoot()
+  // override — the same resolver every other storage module (paths.ts,
+  // archive-write.ts, lifecycle-telemetry.ts) uses. Test suites that scope
+  // storage to a tmp dir via setRoot()/AGENT_RECALL_ROOT (not a HOME
+  // override) had every doSync() failure leak into the REAL user's
+  // ~/.agent-recall/sync-errors.log — confirmed empirically as test
+  // pollution (50/51 real-log entries were /var/folders/.../ar-*-test
+  // fixture paths). getRoot() still falls back to os.homedir() when no
+  // override is set, so this is a pure superset fix: same default behavior,
+  // now override-aware.
+  const logPath = path.join(getRoot(), "sync-errors.log");
   const timestamp = new Date().toISOString();
   const line = `${timestamp} ${message}\n`;
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -108,9 +123,44 @@ export function syncToSupabase(
   filePath: string,
   content: string,
   project: string,
-  store: "journal" | "palace" | "awareness" | "digest",
+  store: "journal" | "palace" | "awareness" | "digest" | "corrections",
   room?: string
 ): void {
+  // PRIVACY GATE (Wave 1, Decision #6): personal-tier data (awareness behavioral
+  // layer, _global palace) does not leave the machine unless sync_personal=true.
+  // Silent skip preserves the fire-and-forget contract.
+  // NOTE: flipping config.sync_personal=true re-feeds the war-room dashboard's
+  // ar_awareness reads.
+  if (classifyStore(store, { project }) === "personal" && readSupabaseConfig()?.sync_personal !== true) {
+    return;
+  }
+  // DOUBLE OPT-IN GATE for corrections (privacy-tier decision, classification.ts).
+  // /corrections/ is a PERSONAL_PATH_MARKER — NOT an oversight. Corrections carry
+  // the raw behavioral layer (rules, context, tags) and must not leave the machine
+  // unless the user has explicitly opted into BOTH:
+  //   1. sync_personal=true  (the existing cloud opt-in, Decision #6)
+  //   2. sync_corrections=true  (the second opt-in for the corrections tier)
+  // Both missing, or only one set → silent skip. This preserves the fire-and-forget
+  // contract and does not produce a visible error — same as the sync_personal gate.
+  if (store === "corrections") {
+    const config = readSupabaseConfig();
+    if (!config?.sync_personal || !config?.sync_corrections) {
+      return;
+    }
+    // Corrections sync: emit the scrubbed CorrectionExport projection via the
+    // EXISTING egress chokepoint (doSync). The raw CorrectionRecord is NEVER
+    // written directly — exportCorrections() applies the fail-closed scrubForExport
+    // to every free-text field before we touch the network.
+    //
+    // The `content` parameter is the correction id (used as the slug discriminator
+    // and to scope the single-record export). We re-derive the scrubbed payload from
+    // exportCorrections so the doSync path always receives pre-scrubbed JSON.
+    const correctionId = content; // caller convention: content = correction id
+    setImmediate(() => {
+      void syncCorrectionRecord(filePath, correctionId, project);
+    });
+    return;
+  }
   setImmediate(() => {
     void doSync(filePath, content, project, store, room);
   });
@@ -127,7 +177,15 @@ async function doSync(
     const client = getSupabaseClient();
     if (!client) return;
 
-    const hash = contentHash(content);
+    // EGRESS CHOKEPOINT — authoritative scrub for ALL upload paths
+    // (syncToSupabase + backfill). Scrub happens BEFORE hashing so the stored
+    // hash always matches the hash computed by backfill's skip-dedup check.
+    // Call-site scrubs (the 9 syncToSupabase callers that pre-wrap content in
+    // scrubForCloud) are redundant defense-in-depth — scrubForCloud is idempotent,
+    // so double-scrub is safe and the call-site wraps are intentionally kept as a
+    // privacy boundary safeguard.
+    const scrubbedContent = scrubForCloud(content);
+    const hash = contentHash(scrubbedContent);
 
     const { data: existing } = await client
       .from("ar_sync_state")
@@ -137,7 +195,7 @@ async function doSync(
 
     if (existing?.file_hash === hash) return;
 
-    const parsed = parseMemoryFile(content);
+    const parsed = parseMemoryFile(scrubbedContent);
     const slug = deriveSlug(filePath);
 
     const { data: entry, error: upsertErr } = await client
@@ -185,6 +243,85 @@ async function doSync(
   }
 }
 
+/**
+ * Sync a single CorrectionRecord (by id) for a project through the existing
+ * doSync egress chokepoint. The raw record is never emitted — exportCorrections()
+ * applies the fail-closed scrubForExport to every free-text field. If the record
+ * does not exist (retracted or unknown id) we silently return without error.
+ *
+ * Called only from the syncToSupabase "corrections" store branch, which has
+ * already verified the double opt-in.
+ */
+async function syncCorrectionRecord(
+  filePath: string,
+  correctionId: string,
+  project: string
+): Promise<void> {
+  try {
+    // Export the single correction (project + no retracted). If the id doesn't
+    // exist in the active set (already retracted or bad id) → empty → skip.
+    const rows = exportCorrections({ project, includeRetracted: true });
+    const row = rows.find((r) => r.id === correctionId);
+    if (!row) return; // retracted or not found — nothing to sync
+
+    // Serialize the CorrectionExport projection as the "content" for doSync.
+    // scrubForExport (inside exportCorrections) already redacted every free-text
+    // field, so doSync's internal scrubForCloud re-scrub is a no-op (idempotent).
+    const scrubbedJson = JSON.stringify(row);
+    await doSync(filePath, scrubbedJson, project, "corrections");
+  } catch (err) {
+    logSyncError(`syncCorrectionRecord failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Gather a project's journal + palace-room files for backfill(), sourced
+ * EXCLUSIVELY through readTierCandidates (P0 trust-class closure,
+ * 2026-08-30, wave/pipe-p0-trustclass, gap #5/#6's root) — never a raw
+ * readFileSync scan. This is the SHARED implementation both autoBackfill
+ * (session-start.ts, run on every session_start) and the CLI's
+ * `ar setup supabase --backfill` admin command call, closing the class of
+ * gap (a hand-rolled directory scan bypassing the rescue-quarantine choke,
+ * previously duplicated independently in BOTH call sites, discovered while
+ * auditing gap #5) in ONE place — class-not-instance, not two parallel
+ * bolt-on fixes. readTierCandidates' safe-by-default posture means a
+ * rescue-tagged file is never included here, so it can never reach
+ * `ar_entries.body` via backfill()/doSync() — closing gap #6's root cause
+ * (recall-backend.ts's `search()` also gets an independent defense-in-depth
+ * check on `metadata.source`, since `body` itself never carries the
+ * frontmatter tag once parseMemoryFile strips it at write time).
+ *
+ * P0 independent-review FIX 4 (2026-08-30) — DISCLOSED, INTENTIONAL scope
+ * narrowing (assessed, not accidental): the journal side inherits
+ * `readTierCandidates("journal", ...)`'s own `listJournalFiles(project,
+ * false)` reader, which requires a leading `^\d{4}-\d{2}-\d{2}` filename
+ * match — this naturally EXCLUDES `journal/_index.md` (the machine-readable
+ * index artifact, not memory content; see `helpers/journal-filter.ts`'s
+ * `isJournalFile` doc comment for why an index file must never be treated
+ * as a journal entry anywhere in this codebase). The palace side inherits
+ * `listRooms()`'s own requirement that a room directory carry a
+ * `_room.json` file — this excludes an unregistered "remnant" room
+ * directory (`palace/rooms.ts`'s own `listRooms()` comment already names
+ * this exact case: "not real rooms, e.g. remnant 'unnamed/' dirs"). BOTH
+ * exclusions are correct for backfill's purpose (syncing genuine MEMORY
+ * CONTENT to Supabase, not index/orphan artifacts) and are the SAME
+ * narrowing every other consumer of these two readers already gets —
+ * verified here, not silently inherited, because backfill is the one
+ * surface whose OUTPUT leaves this machine.
+ */
+export function gatherProjectBackfillFiles(
+  project: string
+): Array<{ path: string; content: string; store: "journal" | "palace"; room?: string }> {
+  const files: Array<{ path: string; content: string; store: "journal" | "palace"; room?: string }> = [];
+  for (const c of readTierCandidates("journal", project)) {
+    files.push({ path: c.sourcePath, content: c.content, store: "journal" });
+  }
+  for (const c of readTierCandidates("palace-room", project)) {
+    files.push({ path: c.sourcePath, content: c.content, store: "palace", room: c.room });
+  }
+  return files;
+}
+
 export async function backfill(
   project: string,
   files: Array<{ path: string; content: string; store: "journal" | "palace" | "awareness" | "digest"; room?: string }>
@@ -196,7 +333,16 @@ export async function backfill(
 
   for (const file of files) {
     try {
-      const hash = contentHash(file.content);
+      // PRIVACY GATE (Wave 1): backfill() calls doSync() directly, bypassing
+      // syncToSupabase()'s gate — so re-apply it here. Count as skipped.
+      if (classifyStore(file.store, { project }) === "personal" && readSupabaseConfig()?.sync_personal !== true) {
+        skipped++;
+        continue;
+      }
+      // Skip-dedup hash must match what doSync stores: hash of SCRUBBED content.
+      // Using raw content here would cause raw_hash != scrubbed_hash for any file
+      // containing a secret pattern, making the skip never fire → re-uploads every run.
+      const hash = contentHash(scrubForCloud(file.content));
       const { data: existing } = await client
         .from("ar_sync_state")
         .select("file_hash")

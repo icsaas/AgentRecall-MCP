@@ -14,6 +14,9 @@ import { palaceWrite } from "./palace-write.js";
 import { knowledgeWrite } from "./knowledge-write.js";
 import { awarenessUpdate } from "./awareness-update.js";
 import { getRoot } from "../types.js";
+import { resolveProject } from "../storage/project.js";
+import { getSessionId } from "../storage/session.js";
+import { recordLifecycleEvent } from "../storage/lifecycle-telemetry.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,6 +140,12 @@ export async function smartRemember(input: SmartRememberInput): Promise<SmartRem
     };
   }
 
+  // C2 (2026-07-26): resolve the project slug once here for lifecycle
+  // telemetry. Downstream sub-tool calls below still receive input.project
+  // unchanged and independently resolve it (resolveProject is idempotent —
+  // this extra call changes no behavior, just gives us the slug to stamp).
+  const resolvedProject = await resolveProject(input.project);
+
   const route = classifyRoute(input.content, input.context);
   const slugResult = generateSlug(input.content);
   const autoName = slugResult.slug;
@@ -192,14 +201,14 @@ export async function smartRemember(input: SmartRememberInput): Promise<SmartRem
       break;
     }
     case "knowledge_write": {
-      // Extract title from first sentence or first line
-      const firstLine = input.content.split(/[.\n]/)[0]?.trim() ?? "Auto-captured lesson";
-      result = await knowledgeWrite({
-        category: slugResult.contentType,
-        title: firstLine.slice(0, 80),
-        what_happened: input.content,
-        root_cause: "See content",
-        fix: "See content",
+      // purity-census-2026-07-05: standalone knowledge/ dir is a write-only graveyard —
+      // nothing reads it (knowledge_read MCP tool deprecated; session_start does not surface it).
+      // New writes route to journal instead (the alive store that IS read back).
+      // Existing files on disk are untouched. To recall old knowledge entries, open
+      // ~/.agent-recall/projects/<name>/knowledge/ directly or use palace/rooms/knowledge/.
+      result = await journalCapture({
+        question: "Auto-captured lesson",
+        answer: input.content,
         project: input.project,
       });
       break;
@@ -312,6 +321,11 @@ export async function smartRemember(input: SmartRememberInput): Promise<SmartRem
       )
       .catch(() => {});
   }
+
+  // C2 — lifecycle telemetry: counters only, never transcript content.
+  // smart_remember has no idempotency-suppression concept (task scope is
+  // limited to session_start/session_end), so dup is always false here.
+  recordLifecycleEvent("remember", getSessionId(), resolvedProject, false);
 
   return {
     success: true,

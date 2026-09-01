@@ -13,7 +13,7 @@ description: >-
   search — same API, semantic understanding. Gracefully degrades to local search
   if not configured.
 origin: community
-version: 3.4.22
+version: 3.4.30
 author: Goldentrii
 platform: clawhub
 install:
@@ -63,7 +63,7 @@ skip:
   - "算了"
 ---
 
-# AgentRecall v3.4.22 — Usage Guide
+# AgentRecall v3.4.30 — Usage Guide
 
 AgentRecall is a persistent memory system. Default surface: **5 tools** (two verbs + three essentials). Full surface: 18 tools via `npx agent-recall-mcp --full`. This guide describes how and when to use them.
 
@@ -72,6 +72,8 @@ AgentRecall is a persistent memory system. Default surface: **5 tools** (two ver
 ## Setup
 
 AgentRecall requires the MCP server to be running. If tool calls fail with "unknown tool", the human needs to install it first.
+
+> **Visual setup guide** (all 13 clients, copy-paste prompts): open `warroom/install.html` from the repo, or the [GitHub raw link](https://raw.githubusercontent.com/Goldentrii/AgentRecall-X/main/warroom/install.html) in a browser.
 
 ### Installation (human runs once)
 
@@ -515,4 +517,4 @@ Corollary: wire before write — a primitive without an automatic trigger will n
 - **Scoped filesystem access:** Reads/writes only to `~/.agent-recall/` (configurable via `--root` flag). Does not access files outside this directory unless the agent explicitly passes project-specific paths.
 - **No code execution:** The MCP server does not execute arbitrary code, run shell commands, or spawn child processes.
 - **Transparent storage:** All data is human-readable markdown and JSON. Inspect it anytime: `ls ~/.agent-recall/` or open it as an Obsidian vault.
-- **Open source:** Full source at [github.com/Goldentrii/AgentRecall](https://github.com/Goldentrii/AgentRecall). MIT license.
+- **Open source:** Full source at [github.com/Goldentrii/AgentRecall-X](https://github.com/Goldentrii/AgentRecall-X). MIT license.
